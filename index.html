@@ -1,0 +1,1225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>CALISTO'S — Staff</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<style>*{margin:0;box-sizing:border-box}html,body,#root{min-height:100%}
+#boot{font-family:system-ui;color:#8A8174;text-align:center;padding:80px 20px}</style>
+</head>
+<body>
+<div id="root"><div id="boot">Opening CALISTO'S…</div></div>
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "https://esm.sh/react@18.3.1";
+import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { ArrowLeftRight, BadgeCheck, Banknote, Bell, CalendarDays, CalendarOff, Check, ChevronLeft, ChevronRight, CircleCheck, CircleDollarSign, Coffee, CreditCard, Hash, Info, LogOut, Mail, MailCheck, MapPin, Megaphone, MessageSquare, Pencil, Plus, Send, ShieldCheck, Timer, Trash2, UserPlus, Users, Wallet, X } from "https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1";
+
+const SUPABASE_URL = "https://sruklonvqydtgstbofms.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNydWtsb252cXlkdGdzdGJvZm1zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyODE3NjAsImV4cCI6MjA5ODg1Nzc2MH0.352OIf2sOHqE-A5Aq3YKzEcU4DxU0p11VKGxoNFidWk";
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+/* ---------------- AUTH ---------------- */
+const auth = {
+  signUp: (email, password, name, role) =>
+    supabase.auth.signUp({ email, password, options: { data: { name, role } } }),
+  signIn: (email, password) =>
+    supabase.auth.signInWithPassword({ email, password }),
+  signOut: () => supabase.auth.signOut(),
+  getSession: () => supabase.auth.getSession(),
+  onChange: (cb) => supabase.auth.onAuthStateChange((event, session) => cb(session, event)),
+
+  // --- password reset ---
+  // Email: sends a reset link; clicking it returns the user to the app in
+  // "recovery" mode where they set a new password.
+  sendResetEmail: (email) =>
+    supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin }),
+  // Phone: sends an SMS one-time code (requires an SMS provider configured
+  // in Supabase Auth settings, and the account must have a phone on file).
+  sendPhoneCode: (phone) => supabase.auth.signInWithOtp({ phone }),
+  verifyPhoneCode: (phone, token) =>
+    supabase.auth.verifyOtp({ phone, token, type: "sms" }),
+  // After recovery link or verified OTP, this sets the new password.
+  updatePassword: (password) => supabase.auth.updateUser({ password }),
+};
+
+/* ---------------- LOAD EVERYTHING ----------------
+   Assembles one `db` object in the shape the UI expects.
+   RLS means each user only receives rows they're allowed to see,
+   so private pay simply won't appear for other people.            */
+async function loadAll() {
+  const q = (t, sel = "*", order) => {
+    let b = supabase.from(t).select(sel);
+    if (order) b = b.order(order.col, { ascending: order.asc !== false });
+    return b;
+  };
+  const [
+    profiles, pp, roles, shifts, availability, trades, pay, affs,
+    notifs, anns, channels, cmembers, messages, published,
+    settings, timeEntries, timeOff,
+  ] = await Promise.all([
+    q("profiles"), q("private_pay"), q("roles"), q("shifts"),
+    q("availability"), q("trades"), q("pay"), q("pay_affirmations"),
+    q("notifications", "*", { col: "created_at", asc: false }),
+    q("announcements"), q("channels"), q("channel_members"),
+    q("messages", "*", { col: "created_at" }), q("published"),
+    q("settings"), q("time_entries", "*", { col: "clock_in", asc: false }), q("time_off", "*", { col: "created_at", asc: false }),
+  ]);
+
+  const err = [profiles, pp, roles, shifts, availability, trades, pay, affs, notifs, anns, channels, cmembers, messages, published].find((r) => r.error);
+  if (err) console.warn("load error:", err.error);
+
+  const ppById = {};
+  (pp.data || []).forEach((r) => { ppById[r.user_id] = r; });
+
+  const users = (profiles.data || []).map((p) => {
+    const comp = ppById[p.id];
+    return {
+      id: p.id, name: p.name, access: p.access, position: p.position,
+      title: p.title, jobRoles: p.job_roles || [], color: p.color,
+      rate: comp ? Number(comp.rate) : 0,
+      method: comp ? comp.method : "—",
+      handle: comp ? comp.handle || "" : "",
+      hasComp: !!comp,
+    };
+  });
+
+  const avail = {};
+  (availability.data || []).forEach((a) => {
+    (avail[a.user_id] = avail[a.user_id] || {})[a.dow] = { on: a.available, s: a.start_time, e: a.end_time };
+  });
+
+  const payMap = {};
+  (pay.data || []).forEach((p) => { payMap[p.shift_id] = { tips: Number(p.tips) || 0, paid: p.paid, affirmed: [] }; });
+  (affs.data || []).forEach((a) => {
+    (payMap[a.shift_id] = payMap[a.shift_id] || { tips: 0, paid: false, affirmed: [] }).affirmed.push(a.user_id);
+  });
+
+  const pubMap = {};
+  (published.data || []).forEach((p) => { pubMap[p.week_key] = new Date(p.released_at).getTime(); });
+
+  return {
+    users,
+    roles: (roles.data || []).map((r) => r.name),
+    shifts: (shifts.data || []).map((s) => ({ id: s.id, date: s.date, start: s.start_time, end: s.end_time, userId: s.user_id, role: s.role, notes: s.notes || "" })),
+    availability: avail,
+    trades: (trades.data || []).map((t) => ({ id: t.id, shiftId: t.shift_id, fromUserId: t.from_user, toUserId: t.to_user, status: t.status })),
+    pay: payMap,
+    published: pubMap,
+    notifications: (notifs.data || []).map((n) => ({ id: n.id, userId: n.user_id, type: n.type, text: n.body, ts: new Date(n.created_at).getTime(), read: n.read })),
+    announcements: (anns.data || []).map((a) => ({ id: a.id, authorId: a.author_id, title: a.title, body: a.body || "", ts: new Date(a.created_at).getTime() })),
+    channels: (channels.data || []).map((c) => ({ id: c.id, name: c.name, members: (cmembers.data || []).filter((m) => m.channel_id === c.id).map((m) => m.user_id) })),
+    messages: (messages.data || []).map((m) => ({ id: m.id, channelId: m.channel_id, userId: m.user_id, text: m.body, ts: new Date(m.created_at).getTime() })),
+    settings: (settings.data && settings.data[0])
+      ? { visible: true, lat: settings.data[0].store_lat, lng: settings.data[0].store_lng, radius: Number(settings.data[0].radius_miles) || 1, address: settings.data[0].store_address || "" }
+      : { visible: false, lat: null, lng: null, radius: 1, address: "" },
+    timeEntries: (timeEntries.data || []).map((t) => ({ id: t.id, userId: t.user_id, in: new Date(t.clock_in).getTime(), out: t.clock_out ? new Date(t.clock_out).getTime() : null })),
+    timeOff: (timeOff.data || []).map((t) => ({ id: t.id, userId: t.user_id, start: t.start_date, end: t.end_date, reason: t.reason || "", status: t.status, ts: new Date(t.created_at).getTime() })),
+  };
+}
+
+/* ---------------- REALTIME ---------------- */
+function subscribe(onChange) {
+  const ch = supabase
+    .channel("calistos-all")
+    .on("postgres_changes", { event: "*", schema: "public" }, onChange)
+    .subscribe();
+  return () => supabase.removeChannel(ch);
+}
+
+/* ---------------- ACTIONS ----------------
+   meId is passed in from the app for "current user" writes.        */
+function makeActions(meId) {
+  return {
+    // shifts
+    addShift: ({ date, start, end, userId, role, notes }) =>
+      supabase.from("shifts").insert({ date, start_time: start, end_time: end, user_id: userId, role, notes }),
+    updateShift: (id, { date, start, end, userId, role, notes }) =>
+      supabase.from("shifts").update({ date, start_time: start, end_time: end, user_id: userId, role, notes }).eq("id", id),
+    deleteShift: (id) => supabase.from("shifts").delete().eq("id", id),
+
+    // availability
+    setAvailability: (userId, dow, { on, s, e }) =>
+      supabase.from("availability").upsert({ user_id: userId, dow, available: on, start_time: s, end_time: e }, { onConflict: "user_id,dow" }),
+
+    // chat
+    sendMessage: (channelId, body) =>
+      supabase.from("messages").insert({ channel_id: channelId, user_id: meId, body }),
+
+    // pay
+    setTip: (shiftId, tips) =>
+      supabase.from("pay").upsert({ shift_id: shiftId, tips }, { onConflict: "shift_id" }),
+    setWeekPaid: (shiftIds, paid) =>
+      supabase.from("pay").upsert(shiftIds.map((id) => ({ shift_id: id, paid })), { onConflict: "shift_id" }),
+    affirmPay: async (shiftId, on) =>
+      on
+        ? supabase.from("pay_affirmations").upsert({ shift_id: shiftId, user_id: meId }, { onConflict: "shift_id,user_id" })
+        : supabase.from("pay_affirmations").delete().eq("shift_id", shiftId).eq("user_id", meId),
+
+    // schedule release
+    releaseWeek: (weekKey) =>
+      supabase.from("published").upsert({ week_key: weekKey, released_at: new Date().toISOString(), released_by: meId }, { onConflict: "week_key" }),
+
+    // announcements
+    postAnnouncement: ({ title, body }) =>
+      supabase.from("announcements").insert({ author_id: meId, title, body }),
+    deleteAnnouncement: (id) => supabase.from("announcements").delete().eq("id", id),
+
+    // trades
+    offerTrade: ({ shiftId, toUser }) =>
+      supabase.from("trades").insert({ shift_id: shiftId, from_user: meId, to_user: toUser, status: "pending" }),
+    respondTrade: (id, accept) =>
+      supabase.from("trades").update({ status: accept ? "accepted" : "declined" }).eq("id", id),
+    cancelTrade: (id) => supabase.from("trades").update({ status: "cancelled" }).eq("id", id),
+    decideTrade: (id, approve) =>
+      supabase.from("trades").update({ status: approve ? "approved" : "denied" }).eq("id", id),
+
+    // roles
+    addRole: (name) => supabase.from("roles").insert({ name }),
+    removeRole: (name) => supabase.from("roles").delete().eq("name", name),
+
+    // team
+    updateMember: async (id, { name, position, access, jobRoles, rate, method }) => {
+      await supabase.from("profiles").update({ name, position, access, title: cap(position), job_roles: jobRoles }).eq("id", id);
+      return supabase.from("private_pay").upsert({ user_id: id, rate, method }, { onConflict: "user_id" });
+    },
+    removeMember: (id) => supabase.from("profiles").delete().eq("id", id),
+
+    // my profile
+    updateMyProfile: ({ method, handle }) =>
+      supabase.from("private_pay").upsert({ user_id: meId, method, handle }, { onConflict: "user_id" }),
+
+    // store location + time clock
+    setStoreLocation: (lat, lng, radius, address) =>
+      supabase.from("settings").update({ store_lat: lat, store_lng: lng, radius_miles: radius, store_address: address || null, updated_by: meId, updated_at: new Date().toISOString() }).eq("id", 1),
+    clockIn: (lat, lng) =>
+      supabase.from("time_entries").insert({ user_id: meId, in_lat: lat, in_lng: lng }),
+    clockOut: (entryId, lat, lng) =>
+      supabase.from("time_entries").update({ clock_out: new Date().toISOString(), out_lat: lat, out_lng: lng }).eq("id", entryId),
+
+    // time off
+    requestTimeOff: ({ start, end, reason }) =>
+      supabase.from("time_off").insert({ user_id: meId, start_date: start, end_date: end, reason }),
+    decideTimeOff: (id, approve) =>
+      supabase.from("time_off").update({ status: approve ? "approved" : "denied" }).eq("id", id),
+    cancelTimeOff: (id) =>
+      supabase.from("time_off").update({ status: "cancelled" }).eq("id", id),
+
+    // notifications
+    markNotificationsRead: () =>
+      supabase.from("notifications").update({ read: true }).eq("user_id", meId).eq("read", false),
+  };
+}
+
+
+
+const C = {
+  bone: "#E9E2D3", boneSoft: "#F4EFE4", card: "#FBF8F0",
+  maroon: "#591C29", maroonDeep: "#3B111A", maroonSoft: "#ECD8DB",
+  silver: "#A9AEB6", silverLt: "#DCDFE4", steel: "#6C717A",
+  ink: "#281A1D", muted: "#8A8174", line: "#DBD3C4",
+  danger: "#9B3A34", green: "#3F6B40", greenSoft: "#DCEAD8",
+  amber: "#A9781C", amberSoft: "#F1E6C6",
+};
+const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DOW_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const PAYMENT_METHODS = ["Direct deposit", "Venmo", "Cash", "Zelle", "Check"];
+const POSITIONS = ["owner", "manager", "employee"];
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const pad = (n) => String(n).padStart(2, "0");
+const toKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+function mondayOf(date) { const d = new Date(date); const day = (d.getDay() + 6) % 7; d.setDate(d.getDate() - day); d.setHours(0, 0, 0, 0); return d; }
+function weekDates(offset = 0) { const m = mondayOf(new Date()); m.setDate(m.getDate() + offset * 7); return Array.from({ length: 7 }, (_, i) => { const d = new Date(m); d.setDate(m.getDate() + i); return d; }); }
+const fmtDay = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const dlabel = (key) => new Date(key + "T00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+const weekLabel = (w) => `${fmtDay(w[0])}–${fmtDay(w[6])}`;
+function toMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
+function hoursBetween(s, e) { let d = (toMin(e) - toMin(s)) / 60; if (d < 0) d += 24; return Math.round(d * 100) / 100; }
+function fmtTime(t) { const [h, m] = t.split(":").map(Number); const ap = h >= 12 ? "PM" : "AM"; const hh = h % 12 || 12; return `${hh}:${pad(m)} ${ap}`; }
+const money = (n) => `$${(n || 0).toFixed(2)}`;
+const todayKey = () => toKey(new Date());
+const rateOf = (db, userId) => db.users.find((u) => u.id === userId)?.rate || 0;
+const payFor = (db, id) => db.pay?.[id] || { tips: 0, paid: false, affirmed: [] };
+function milesBetween(lat1, lng1, lat2, lng2) {
+  const r = (d) => (d * Math.PI) / 180;
+  return 3958.8 * 2 * Math.asin(Math.sqrt(
+    Math.sin(r(lat2 - lat1) / 2) ** 2 +
+    Math.cos(r(lat1)) * Math.cos(r(lat2)) * Math.sin(r(lng2 - lng1) / 2) ** 2
+  ));
+}
+function getPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error("This device doesn't support location."));
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      (e) => reject(new Error(e.code === 1 ? "Location permission was denied. Allow location access and try again." : "Couldn't get your location. Try again.")),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
+    );
+  });
+}
+async function geocodeAddress(addr) {
+  const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(addr)}`, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error("The address lookup service didn't respond — try again in a minute.");
+  const j = await res.json();
+  if (!j.length) throw new Error("Address not found — try adding the city and state.");
+  return { lat: parseFloat(j[0].lat), lng: parseFloat(j[0].lon), address: addr };
+}
+const offOn = (db, userId, dateKey) => (db.timeOff || []).some((t) => t.userId === userId && t.status === "approved" && dateKey >= t.start && dateKey <= t.end);
+const fmtDur = (ms) => { const m = Math.floor(ms / 60000); return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`; };
+
+function Btn({ children, onClick, variant = "primary", small, style, type = "button", disabled }) {
+  const v = {
+    primary: { bg: C.maroon, fg: "#fff", bd: C.maroon }, ghost: { bg: "transparent", fg: C.ink, bd: C.line },
+    dark: { bg: C.maroonDeep, fg: C.boneSoft, bd: C.maroonDeep }, danger: { bg: "transparent", fg: C.danger, bd: "#E0C2C0" },
+    steel: { bg: C.silverLt, fg: C.ink, bd: C.silver }, green: { bg: C.green, fg: "#fff", bd: C.green },
+  }[variant];
+  return <button type={type} onClick={onClick} disabled={disabled} className="cw-btn" style={{ background: v.bg, color: v.fg, border: `1px solid ${v.bd}`, padding: small ? "6px 11px" : "9px 15px", fontSize: small ? 12.5 : 13.5, borderRadius: 9, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1, display: "inline-flex", alignItems: "center", gap: 6, lineHeight: 1, whiteSpace: "nowrap", ...style }}>{children}</button>;
+}
+function Modal({ title, onClose, children, wide }) {
+  return <div className="cw-overlay" onMouseDown={onClose}><div className="cw-modal" style={{ maxWidth: wide ? 620 : 460 }} onMouseDown={(e) => e.stopPropagation()}><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}><h3 style={{ fontFamily: "Fraunces, serif", fontSize: 21, color: C.ink, margin: 0 }}>{title}</h3><button onClick={onClose} className="cw-x"><X size={18} /></button></div>{children}</div></div>;
+}
+function Field({ label, children }) { return <label style={{ display: "block", marginBottom: 13 }}><span style={{ display: "block", fontSize: 11.5, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: C.muted, marginBottom: 5 }}>{label}</span>{children}</label>; }
+const inputStyle = { width: "100%", padding: "9px 11px", borderRadius: 8, border: `1px solid ${C.line}`, background: "#fff", fontSize: 14, color: C.ink, boxSizing: "border-box", fontFamily: "inherit" };
+function Avatar({ user, size = 30 }) { if (!user) return null; return <div style={{ width: size, height: size, borderRadius: "50%", background: user.color || C.maroon, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: size * 0.42, flexShrink: 0 }}>{(user.name || "?")[0]}</div>; }
+function Empty({ icon, text }) { return <div style={{ textAlign: "center", padding: "44px 16px", color: C.muted }}><div style={{ opacity: 0.5, marginBottom: 10 }}>{icon}</div><div style={{ fontSize: 13.5 }}>{text}</div></div>; }
+function PositionBadge({ position }) { if (position === "employee") return null; return <span className="cw-pill" style={{ background: C.maroonSoft, color: C.maroon }}><ShieldCheck size={11} /> {cap(position)}</span>; }
+function Toggle({ on, onClick, color = C.maroon }) { return <button className="cw-toggle" onClick={onClick} style={{ background: on ? color : C.silver }}><span className="cw-knob" style={{ left: on ? 20 : 2 }} /></button>; }
+const segStyle = (on) => ({ background: on ? C.maroon : "transparent", color: on ? "#fff" : C.steel });
+
+function App() {
+  const [session, setSession] = useState(null);
+  const [db, setDb] = useState(null);
+  const [booting, setBooting] = useState(true);
+  const [tab, setTab] = useState("schedule");
+
+  const [recovery, setRecovery] = useState(false);
+  useEffect(() => {
+    auth.getSession().then(({ data }) => setSession(data.session));
+    const sub = auth.onChange((s, event) => {
+      setSession(s);
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      if (event === "SIGNED_OUT") setRecovery(false);
+    });
+    return () => sub.data.subscription.unsubscribe();
+  }, []);
+
+  const refresh = useCallback(async () => { try { setDb(await loadAll()); } catch (e) { console.warn(e); } }, []);
+
+  useEffect(() => {
+    if (!session) { setDb(null); setBooting(false); return; }
+    let active = true; setBooting(true);
+    refresh().then(() => active && setBooting(false));
+    const unsub = subscribe(() => refresh());
+    return () => { active = false; unsub(); };
+  }, [session, refresh]);
+
+  const meId = session?.user?.id || null;
+  const rawActions = useMemo(() => makeActions(meId), [meId]);
+  const actions = useMemo(() => {
+    const o = {};
+    for (const k of Object.keys(rawActions)) o[k] = async (...a) => { const r = await rawActions[k](...a); await refresh(); return r; };
+    return o;
+  }, [rawActions, refresh]);
+
+  if (!session) return <Shell><AuthScreen /></Shell>;
+  if (recovery) return <Shell><SetNewPassword onDone={() => setRecovery(false)} /></Shell>;
+  if (booting || !db) return <Shell><Splash text="Opening the counter…" /></Shell>;
+
+  const me = db.users.find((u) => u.id === meId);
+  if (!me) return <Shell><Splash text="Finishing account setup…" sub="If this persists, your profile may not exist yet — try again in a moment." action={<Btn onClick={refresh}>Refresh</Btn>} /></Shell>;
+
+  const isEmployer = me.access === "employer";
+  const tabs = [
+    { id: "schedule", label: "Schedule", icon: CalendarDays }, { id: "availability", label: "Availability", icon: Clock },
+    { id: "chat", label: "Chat", icon: MessageSquare }, { id: "pay", label: "Pay", icon: Wallet },
+    { id: "news", label: "News", icon: Megaphone }, { id: "team", label: "Team", icon: Users },
+  ];
+
+  return (
+    <Shell>
+      <Header me={me} db={db} actions={actions} onSignOut={() => auth.signOut()} />
+      <nav className="cw-tabs">
+        {tabs.map((t) => { const Icon = t.icon; const active = tab === t.id; return <button key={t.id} onClick={() => setTab(t.id)} className="cw-tab" style={{ color: active ? C.maroon : C.muted, borderBottom: active ? `2px solid ${C.maroon}` : "2px solid transparent" }}><Icon size={17} /><span>{t.label}</span></button>; })}
+      </nav>
+      <main className="cw-main">
+        {tab === "schedule" && <ScheduleView db={db} me={me} isEmployer={isEmployer} actions={actions} />}
+        {tab === "availability" && <AvailabilityView db={db} me={me} isEmployer={isEmployer} actions={actions} />}
+        {tab === "chat" && <ChatView db={db} me={me} actions={actions} />}
+        {tab === "pay" && <PayView db={db} me={me} isEmployer={isEmployer} actions={actions} />}
+        {tab === "news" && <NewsView db={db} me={me} isEmployer={isEmployer} actions={actions} />}
+        {tab === "team" && <TeamView db={db} me={me} isEmployer={isEmployer} actions={actions} />}
+      </main>
+    </Shell>
+  );
+}
+
+function Splash({ text, sub, action }) {
+  return <div style={{ padding: "70px 24px", textAlign: "center", color: C.muted }}><div style={{ fontFamily: "Fraunces, serif", fontSize: 15, marginBottom: 8 }}>{text}</div>{sub && <div style={{ fontSize: 12.5, marginBottom: 14, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>{sub}</div>}{action}</div>;
+}
+function Shell({ children }) {
+  useEffect(() => {
+    if (!document.getElementById("cw-fonts")) {
+      const l = document.createElement("link"); l.id = "cw-fonts"; l.rel = "stylesheet";
+      l.href = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap";
+      document.head.appendChild(l);
+    }
+  }, []);
+  return (<><style>{CSS}</style><div className="cw-root"><div className="cw-frame">{children}</div></div></>);
+}
+
+/* ---------------- AUTH ---------------- */
+function AuthScreen() {
+  const [view, setView] = useState("login");
+  const [sentTo, setSentTo] = useState("");
+  return (
+    <>
+      <div style={{ background: C.maroon, padding: "38px 24px 30px", textAlign: "center" }}>
+        <div style={{ fontFamily: "Fraunces, serif", color: C.boneSoft, fontSize: 34, fontWeight: 600, letterSpacing: ".14em" }}>CALISTO'S</div>
+        <div style={{ color: C.silver, fontSize: 11, letterSpacing: ".34em", textTransform: "uppercase", marginTop: 7 }}>Staff Operations</div>
+      </div>
+      <div style={{ padding: "24px 22px 40px" }}>
+        {view === "login" && <LoginForm goSignup={() => setView("signup")} goForgot={() => setView("forgot")} />}
+        {view === "signup" && <SignupForm goLogin={() => setView("login")} onSent={(e) => { setSentTo(e); setView("sent"); }} />}
+        {view === "sent" && <ConfirmNotice email={sentTo} goLogin={() => setView("login")} />}
+        {view === "forgot" && <ForgotPassword goLogin={() => setView("login")} />}
+      </div>
+    </>
+  );
+}
+function LoginForm({ goSignup, goForgot }) {
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
+  const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  async function submit() { setBusy(true); setErr(""); const { error } = await auth.signIn(email.trim(), password); setBusy(false); if (error) setErr(error.message); }
+  return (
+    <div>
+      <h2 style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: C.ink, margin: "0 0 4px" }}>Sign in</h2>
+      <p style={{ fontSize: 13, color: C.muted, margin: "0 0 18px" }}>Welcome back.</p>
+      <Field label="Email"><input style={inputStyle} value={email} onChange={(e) => { setEmail(e.target.value); setErr(""); }} placeholder="you@calistos.co" inputMode="email" /></Field>
+      <Field label="Password"><input style={inputStyle} type="password" value={password} onChange={(e) => { setPassword(e.target.value); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••" /></Field>
+      {err && <div style={{ color: C.danger, fontSize: 12.5, marginBottom: 12 }}>{err}</div>}
+      <Btn onClick={submit} disabled={busy} style={{ width: "100%", justifyContent: "center" }}>{busy ? "Signing in…" : "Sign in"}</Btn>
+      <div style={{ textAlign: "center", fontSize: 13, color: C.muted, marginTop: 12 }}><button className="cw-link" onClick={goForgot}>Forgot your password?</button></div>
+      <div style={{ textAlign: "center", fontSize: 13, color: C.muted, marginTop: 10 }}>New here? <button className="cw-link" onClick={goSignup}>Create an account</button></div>
+    </div>
+  );
+}
+function SignupForm({ goLogin, onSent }) {
+  const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
+  const [kind, setKind] = useState("employee"); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  async function submit() {
+    if (!name.trim()) { setErr("Add your name."); return; }
+    if (!email.trim()) { setErr("Add your email."); return; }
+    if (password.length < 6) { setErr("Use a password of at least 6 characters."); return; }
+    setBusy(true); setErr("");
+    const { data, error } = await auth.signUp(email.trim(), password, name.trim(), kind);
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    if (data.session) return;
+    onSent(email.trim());
+  }
+  return (
+    <div>
+      <h2 style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: C.ink, margin: "0 0 4px" }}>Create your account</h2>
+      <p style={{ fontSize: 13, color: C.muted, margin: "0 0 18px" }}>We'll email you a link to confirm it.</p>
+      <Field label="Full name"><input style={inputStyle} value={name} onChange={(e) => { setName(e.target.value); setErr(""); }} placeholder="First and last" /></Field>
+      <Field label="Email"><input style={inputStyle} value={email} onChange={(e) => { setEmail(e.target.value); setErr(""); }} placeholder="you@example.com" inputMode="email" /></Field>
+      <Field label="Password"><input style={inputStyle} type="password" value={password} onChange={(e) => { setPassword(e.target.value); setErr(""); }} placeholder="At least 6 characters" /></Field>
+      <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: C.muted, marginBottom: 7 }}>I'm joining as</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 10 }}>
+        <button className="cw-choice" style={choiceStyle(kind === "employee")} onClick={() => setKind("employee")}><Users size={18} /><span style={{ fontWeight: 700, fontSize: 14 }}>Employee</span><span style={{ fontSize: 11.5, color: C.muted }}>Shifts, availability, pay</span></button>
+        <button className="cw-choice" style={choiceStyle(kind === "employer")} onClick={() => setKind("employer")}><ShieldCheck size={18} /><span style={{ fontWeight: 700, fontSize: 14 }}>Employer</span><span style={{ fontSize: 11.5, color: C.muted }}>Schedules, payroll, team</span></button>
+      </div>
+      <div style={{ fontSize: 11.5, color: C.steel, marginBottom: 8, display: "flex", gap: 6 }}><Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />The first account becomes the owner. After that, employer access is granted by an existing employer in the Team tab.</div>
+      {err && <div style={{ color: C.danger, fontSize: 12.5, margin: "4px 0 10px" }}>{err}</div>}
+      <Btn onClick={submit} disabled={busy} style={{ width: "100%", justifyContent: "center" }}>{busy ? "Creating…" : "Create account"}</Btn>
+      <div style={{ textAlign: "center", fontSize: 13, color: C.muted, marginTop: 16 }}>Already have one? <button className="cw-link" onClick={goLogin}>Sign in</button></div>
+    </div>
+  );
+}
+function ForgotPassword({ goLogin }) {
+  const [method, setMethod] = useState("email");
+  const [step, setStep] = useState("start"); // start | emailSent | code | newpass
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [code, setCode] = useState("");
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function sendEmail() {
+    if (!email.trim()) { setErr("Enter your account email."); return; }
+    setBusy(true); setErr("");
+    const { error } = await auth.sendResetEmail(email.trim());
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    setStep("emailSent");
+  }
+  async function sendSms() {
+    if (!phone.trim()) { setErr("Enter your account phone number."); return; }
+    setBusy(true); setErr("");
+    const { error } = await auth.sendPhoneCode(phone.trim());
+    setBusy(false);
+    if (error) {
+      const m = error.message || "";
+      setErr(/provider|sms|not enabled|unsupported/i.test(m)
+        ? "Text-message reset isn't switched on for this workspace yet (it needs an SMS provider in Supabase). Use email reset, or ask the owner."
+        : m);
+      return;
+    }
+    setStep("code");
+  }
+  async function verify() {
+    if (code.trim().length < 6) { setErr("Enter the 6-digit code from the text."); return; }
+    setBusy(true); setErr("");
+    const { error } = await auth.verifyPhoneCode(phone.trim(), code.trim());
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    setStep("newpass"); // OTP verified -> signed in -> can set password
+  }
+  async function saveNewPass() {
+    if (pw.length < 6) { setErr("Use at least 6 characters."); return; }
+    if (pw !== pw2) { setErr("Passwords don't match."); return; }
+    setBusy(true); setErr("");
+    const { error } = await auth.updatePassword(pw);
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    // signed in with new password; App will render the main UI via session
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: C.ink, margin: "0 0 4px" }}>Reset your password</h2>
+      <p style={{ fontSize: 13, color: C.muted, margin: "0 0 18px" }}>
+        {step === "start" && "Enter your account email and we'll send a reset link."}
+        {step === "emailSent" && "Check your inbox."}
+        {step === "newpass" && "You're verified — pick a new password."}
+      </p>
+
+      {step === "start" && (
+        <>
+          <Field label="Account email"><input style={inputStyle} value={email} onChange={(e) => { setEmail(e.target.value); setErr(""); }} placeholder="you@calistos.co" inputMode="email" onKeyDown={(e) => e.key === "Enter" && sendEmail()} /></Field>
+          {err && <div style={{ color: C.danger, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+          <Btn onClick={sendEmail} disabled={busy} style={{ width: "100%", justifyContent: "center" }}>{busy ? "Sending…" : "Email me a reset link"}</Btn>
+        </>
+      )}
+
+      {step === "emailSent" && (
+        <div style={{ textAlign: "center" }}>
+          <div style={{ width: 52, height: 52, borderRadius: "50%", background: C.maroonSoft, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}><MailCheck size={24} color={C.maroon} /></div>
+          <p style={{ fontSize: 13.5, color: C.muted, margin: "0 0 16px" }}>We sent a reset link to <b style={{ color: C.ink }}>{email}</b>. Open it on this device and you'll be asked for a new password.</p>
+        </div>
+      )}
+
+
+
+      {step === "newpass" && (
+        <>
+          <Field label="New password"><input style={inputStyle} type="password" value={pw} onChange={(e) => { setPw(e.target.value); setErr(""); }} placeholder="At least 6 characters" /></Field>
+          <Field label="Repeat it"><input style={inputStyle} type="password" value={pw2} onChange={(e) => { setPw2(e.target.value); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && saveNewPass()} /></Field>
+          {err && <div style={{ color: C.danger, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+          <Btn onClick={saveNewPass} disabled={busy} style={{ width: "100%", justifyContent: "center" }}>{busy ? "Saving…" : "Save new password"}</Btn>
+        </>
+      )}
+
+      <div style={{ textAlign: "center", fontSize: 13, color: C.muted, marginTop: 16 }}><button className="cw-link" onClick={goLogin}>Back to sign in</button></div>
+    </div>
+  );
+}
+
+function SetNewPassword({ onDone }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function save() {
+    if (pw.length < 6) { setErr("Use at least 6 characters."); return; }
+    if (pw !== pw2) { setErr("Passwords don't match."); return; }
+    setBusy(true); setErr("");
+    const { error } = await auth.updatePassword(pw);
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    onDone();
+  }
+  return (
+    <>
+      <div style={{ background: C.maroon, padding: "38px 24px 30px", textAlign: "center" }}>
+        <div style={{ fontFamily: "Fraunces, serif", color: C.boneSoft, fontSize: 34, fontWeight: 600, letterSpacing: ".14em" }}>CALISTO'S</div>
+        <div style={{ color: C.silver, fontSize: 11, letterSpacing: ".34em", textTransform: "uppercase", marginTop: 7 }}>Staff Operations</div>
+      </div>
+      <div style={{ padding: "24px 22px 40px" }}>
+        <h2 style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: C.ink, margin: "0 0 4px" }}>Set a new password</h2>
+        <p style={{ fontSize: 13, color: C.muted, margin: "0 0 18px" }}>Your reset link worked — choose a new password to finish.</p>
+        <Field label="New password"><input style={inputStyle} type="password" value={pw} onChange={(e) => { setPw(e.target.value); setErr(""); }} placeholder="At least 6 characters" /></Field>
+        <Field label="Repeat it"><input style={inputStyle} type="password" value={pw2} onChange={(e) => { setPw2(e.target.value); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && save()} /></Field>
+        {err && <div style={{ color: C.danger, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+        <Btn onClick={save} disabled={busy} style={{ width: "100%", justifyContent: "center" }}>{busy ? "Saving…" : "Save & continue"}</Btn>
+      </div>
+    </>
+  );
+}
+
+function ConfirmNotice({ email, goLogin }) {
+  return (
+    <div style={{ textAlign: "center" }}>
+      <div style={{ width: 52, height: 52, borderRadius: "50%", background: C.maroonSoft, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}><MailCheck size={24} color={C.maroon} /></div>
+      <h2 style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: C.ink, margin: "0 0 6px" }}>Confirm your email</h2>
+      <p style={{ fontSize: 13.5, color: C.muted, margin: "0 0 18px" }}>We sent a confirmation link to <b style={{ color: C.ink }}>{email}</b>. Click it, then sign in.</p>
+      <Btn onClick={goLogin} style={{ width: "100%", justifyContent: "center" }}>Back to sign in</Btn>
+    </div>
+  );
+}
+const choiceStyle = (on) => ({ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start", textAlign: "left", padding: "13px", borderRadius: 12, cursor: "pointer", background: on ? C.maroonSoft : C.card, border: `1.5px solid ${on ? C.maroon : C.line}`, color: on ? C.maroon : C.ink });
+
+/* ---------------- HEADER ---------------- */
+function Header({ me, db, actions, onSignOut }) {
+  const [menu, setMenu] = useState(false); const [bell, setBell] = useState(false);
+  const myNotifs = (db.notifications || []).filter((n) => n.userId === me.id);
+  const unread = myNotifs.filter((n) => !n.read).length;
+  function openBell() { setBell((b) => { const nb = !b; if (nb && unread) actions.markNotificationsRead(); return nb; }); }
+  return (
+    <header className="cw-header">
+      <div style={{ display: "flex", alignItems: "baseline", gap: 11 }}><span style={{ fontFamily: "Fraunces, serif", color: C.boneSoft, fontSize: 21, fontWeight: 600, letterSpacing: ".12em" }}>CALISTO'S</span><span style={{ color: C.silver, fontSize: 10, letterSpacing: ".24em", textTransform: "uppercase" }}>Ops</span></div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ position: "relative" }}>
+          <button className="cw-bell" onClick={openBell}><Bell size={18} color={C.boneSoft} />{unread > 0 && <span className="cw-badge">{unread > 9 ? "9+" : unread}</span>}</button>
+          {bell && <><div className="cw-backdrop" onClick={() => setBell(false)} /><div className="cw-menu" style={{ width: 290, maxHeight: 380, overflowY: "auto" }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: C.muted, padding: "4px 10px 8px", fontWeight: 700 }}>Notifications</div>
+            {myNotifs.length === 0 ? <div style={{ padding: "16px 12px", color: C.muted, fontSize: 13 }}>Nothing yet.</div> : myNotifs.slice(0, 30).map((n) => <div key={n.id} style={{ display: "flex", gap: 9, padding: "9px 10px" }}><NotifIcon type={n.type} /><div><div style={{ fontSize: 13, color: C.ink, lineHeight: 1.4 }}>{n.text}</div><div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{new Date(n.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })}, {new Date(n.ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</div></div></div>)}
+          </div></>}
+        </div>
+        <div style={{ position: "relative" }}>
+          <button className="cw-me" onClick={() => setMenu((o) => !o)}><Avatar user={me} size={28} /><span style={{ color: C.boneSoft, fontSize: 13, fontWeight: 600 }}>{me.name}</span>{me.access === "employer" && <ShieldCheck size={13} color={C.silver} />}</button>
+          {menu && <><div className="cw-backdrop" onClick={() => setMenu(false)} /><div className="cw-menu">
+            <div style={{ padding: "6px 12px 10px", display: "flex", alignItems: "center", gap: 9, borderBottom: `1px solid ${C.line}` }}><Avatar user={me} size={32} /><div><div style={{ fontWeight: 700, color: C.ink, fontSize: 13.5 }}>{me.name}</div><div style={{ fontSize: 11.5, color: C.muted }}>{cap(me.position)} · {me.access === "employer" ? "Employer" : "Employee"}</div></div></div>
+            <button className="cw-menuitem" onClick={() => { onSignOut(); setMenu(false); }} style={{ marginTop: 4 }}><LogOut size={16} color={C.muted} /><span style={{ color: C.ink, fontSize: 13.5 }}>Sign out</span></button>
+          </div></>}
+        </div>
+      </div>
+    </header>
+  );
+}
+function NotifIcon({ type }) {
+  const map = { schedule: { i: CalendarDays, c: C.maroon }, pay: { i: Wallet, c: C.green }, trade: { i: ArrowLeftRight, c: C.amber }, timeoff: { i: CalendarOff, c: C.steel } };
+  const { i: I, c } = map[type] || { i: Bell, c: C.steel };
+  return <div style={{ width: 28, height: 28, borderRadius: 8, background: C.boneSoft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><I size={15} color={c} /></div>;
+}
+
+/* ---------------- SCHEDULE ---------------- */
+function ScheduleView({ db, me, isEmployer, actions }) {
+  const [offset, setOffset] = useState(0);
+  const week = weekDates(offset); const weekKey = toKey(week[0]);
+  const [selIdx, setSelIdx] = useState(() => Math.min(6, (new Date().getDay() + 6) % 7));
+  const [editing, setEditing] = useState(null); const [tradeFor, setTradeFor] = useState(null);
+  const selDate = toKey(week[selIdx]);
+  const userById = (id) => db.users.find((u) => u.id === id);
+  const dayShifts = (key) => db.shifts.filter((s) => s.date === key).sort((a, b) => a.start.localeCompare(b.start));
+  const mine = (key) => dayShifts(key).filter((s) => s.userId === me.id);
+  const visible = dayShifts(selDate);
+  const published = db.published?.[weekKey];
+  const weekHasShifts = week.some((d) => dayShifts(toKey(d)).length);
+  const myIncoming = (db.trades || []).filter((t) => t.toUserId === me.id && t.status === "pending");
+  const myOutgoing = (db.trades || []).filter((t) => t.fromUserId === me.id && ["pending", "accepted"].includes(t.status));
+  const approvals = isEmployer ? (db.trades || []).filter((t) => t.status === "accepted") : [];
+  return (
+    <div>
+      <SectionTitle title="Schedule" sub={isEmployer ? "Build the week, then release it." : "Your shifts and the full floor."} action={isEmployer && <Btn small onClick={() => setEditing({ date: selDate })}><Plus size={15} /> Add shift</Btn>} />
+      <ClockCard db={db} me={me} actions={actions} />
+      {isEmployer ? (
+        <div className="cw-card" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, padding: "10px 13px" }}>
+          <BadgeCheck size={18} color={published ? C.green : C.muted} />
+          <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 13, color: C.ink }}>{published ? "Released" : "Draft"} · {weekLabel(week)}</div><div style={{ fontSize: 11.5, color: C.muted }}>{published ? `Notified ${new Date(published).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : "Staff aren't notified until you release."}</div></div>
+          <Btn small variant={published ? "ghost" : "primary"} disabled={!weekHasShifts} onClick={() => actions.releaseWeek(weekKey)}>{published ? "Notify again" : "Release"}</Btn>
+        </div>
+      ) : <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12, fontSize: 12, color: published ? C.green : C.muted }}><BadgeCheck size={14} /> {published ? `Schedule released for ${weekLabel(week)}` : `Schedule for ${weekLabel(week)} isn't final yet`}</div>}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <button className="cw-nav" onClick={() => setOffset((o) => o - 1)}><ChevronLeft size={18} /></button>
+        <div style={{ textAlign: "center" }}><div style={{ fontWeight: 700, color: C.ink, fontSize: 14 }}>{weekLabel(week)}</div><div style={{ fontSize: 11.5, color: C.muted }}>{offset === 0 ? "This week" : offset === 1 ? "Next week" : offset === -1 ? "Last week" : `${offset > 0 ? "+" : ""}${offset} weeks`}</div></div>
+        <button className="cw-nav" onClick={() => setOffset((o) => o + 1)}><ChevronRight size={18} /></button>
+      </div>
+      <div className="cw-weekstrip">
+        {week.map((d, i) => { const key = toKey(d); const has = dayShifts(key).length; const mineCount = mine(key).length; const today = todayKey() === key; const active = i === selIdx;
+          return <button key={key} onClick={() => setSelIdx(i)} className="cw-daycell" style={{ background: active ? C.maroon : C.card, borderColor: active ? C.maroon : C.line }}><span style={{ fontSize: 10.5, color: active ? C.silver : C.muted }}>{DOW[i]}</span><span style={{ fontSize: 17, fontWeight: 700, color: active ? C.boneSoft : (today ? C.maroon : C.ink) }}>{d.getDate()}</span><span style={{ display: "flex", gap: 3, height: 6 }}>{has > 0 && <i style={{ width: 5, height: 5, borderRadius: 9, background: mineCount ? (active ? C.silverLt : C.maroon) : C.silver }} />}</span></button>; })}
+      </div>
+      <div style={{ marginTop: 6 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".05em", margin: "16px 0 10px" }}>{DOW_FULL[selIdx]}, {fmtDay(week[selIdx])}</div>
+        {visible.length === 0 ? <Empty icon={<CalendarDays size={30} />} text={isEmployer ? "No shifts yet." : "Nothing scheduled this day."} /> : (
+          <div style={{ display: "grid", gap: 9 }}>
+            {visible.map((s) => { const u = userById(s.userId); const isMine = s.userId === me.id; const future = s.date >= todayKey(); const pendingTrade = (db.trades || []).some((t) => t.shiftId === s.id && ["pending", "accepted"].includes(t.status));
+              return <div key={s.id} className="cw-card" style={{ borderLeft: `4px solid ${u?.color || C.line}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+                  <Avatar user={u} size={36} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}><span style={{ fontWeight: 700, color: C.ink, fontSize: 14.5 }}>{u?.name || "Unassigned"}</span>{isMine && <span className="cw-pill" style={{ background: C.maroonSoft, color: C.maroon }}>You</span>}<span className="cw-pill" style={{ background: C.silverLt, color: C.steel }}>{s.role}</span>{pendingTrade && <span className="cw-pill" style={{ background: C.amberSoft, color: C.amber }}><ArrowLeftRight size={11} /> Trade pending</span>}{offOn(db, s.userId, s.date) && <span className="cw-pill" style={{ background: C.silverLt, color: C.steel }}><CalendarOff size={11} /> On approved leave</span>}</div>
+                    <div style={{ fontSize: 13, color: C.muted, marginTop: 3 }}>{fmtTime(s.start)} – {fmtTime(s.end)} · {hoursBetween(s.start, s.end)}h{s.notes ? ` · ${s.notes}` : ""}</div>
+                  </div>
+                  {isEmployer && <button className="cw-iconbtn" onClick={() => setEditing(s)}><Pencil size={15} /></button>}
+                </div>
+                {isMine && future && !pendingTrade && <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.boneSoft}` }}><Btn small variant="steel" onClick={() => setTradeFor(s)}><ArrowLeftRight size={14} /> Offer to trade</Btn></div>}
+              </div>; })}
+          </div>
+        )}
+      </div>
+      {approvals.length > 0 && <TradeApprovals db={db} approvals={approvals} actions={actions} />}
+      {(myIncoming.length > 0 || myOutgoing.length > 0) && <MyTrades db={db} incoming={myIncoming} outgoing={myOutgoing} actions={actions} />}
+      {editing && <ShiftModal db={db} shift={editing} onClose={() => setEditing(null)} actions={actions} />}
+      {tradeFor && <OfferTradeModal db={db} me={me} shift={tradeFor} onClose={() => setTradeFor(null)} actions={actions} />}
+    </div>
+  );
+}
+function OfferTradeModal({ db, me, shift, onClose, actions }) {
+  const candidates = db.users.filter((u) => u.position !== "owner" && u.id !== me.id);
+  const [pick, setPick] = useState("");
+  return (
+    <Modal title="Offer to trade" onClose={onClose}>
+      <div style={{ background: C.boneSoft, borderRadius: 9, padding: "10px 12px", marginBottom: 14, fontSize: 12.5, color: C.muted }}>Your <b style={{ color: C.ink }}>{shift.role}</b> shift, {dlabel(shift.date)} · {fmtTime(shift.start)}–{fmtTime(shift.end)}. They accept, then a manager approves.</div>
+      <Field label="Give this shift to"><select style={inputStyle} value={pick} onChange={(e) => setPick(e.target.value)}><option value="">Choose a coworker…</option>{candidates.map((u) => <option key={u.id} value={u.id}>{u.name}{u.jobRoles.includes(shift.role) ? ` — works ${shift.role}` : ""}</option>)}</select></Field>
+      <div style={{ display: "flex", gap: 9, justifyContent: "flex-end" }}><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn disabled={!pick} onClick={() => { actions.offerTrade({ shiftId: shift.id, toUser: pick }); onClose(); }}>Send request</Btn></div>
+    </Modal>
+  );
+}
+function TradeApprovals({ db, approvals, actions }) {
+  const getShift = (id) => db.shifts.find((s) => s.id === id); const getU = (id) => db.users.find((u) => u.id === id);
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.amber, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}><ArrowLeftRight size={14} /> Trade approvals</div>
+      <div style={{ display: "grid", gap: 9 }}>{approvals.map((t) => { const sh = getShift(t.shiftId); const from = getU(t.fromUserId); const to = getU(t.toUserId); if (!sh) return null;
+        return <div key={t.id} className="cw-card" style={{ borderLeft: `4px solid ${C.amber}` }}><div style={{ fontSize: 13.5, color: C.ink, marginBottom: 8 }}><b>{from?.name}</b> → <b>{to?.name}</b> · {sh.role}, {dlabel(sh.date)} {fmtTime(sh.start)}–{fmtTime(sh.end)}</div><div style={{ display: "flex", gap: 9 }}><Btn small variant="green" onClick={() => actions.decideTrade(t.id, true)}><Check size={14} /> Approve</Btn><Btn small variant="danger" onClick={() => actions.decideTrade(t.id, false)}><X size={14} /> Deny</Btn></div></div>; })}</div>
+    </div>
+  );
+}
+function MyTrades({ db, incoming, outgoing, actions }) {
+  const getShift = (id) => db.shifts.find((s) => s.id === id); const getU = (id) => db.users.find((u) => u.id === id);
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}><ArrowLeftRight size={14} /> Shift trades</div>
+      <div style={{ display: "grid", gap: 9 }}>
+        {incoming.map((t) => { const sh = getShift(t.shiftId); const from = getU(t.fromUserId); if (!sh) return null;
+          return <div key={t.id} className="cw-card"><div style={{ fontSize: 13.5, color: C.ink, marginBottom: 8 }}><b>{from?.name}</b> offers you their {sh.role} shift · {dlabel(sh.date)} {fmtTime(sh.start)}–{fmtTime(sh.end)}</div><div style={{ display: "flex", gap: 9 }}><Btn small variant="green" onClick={() => actions.respondTrade(t.id, true)}><Check size={14} /> Accept</Btn><Btn small variant="ghost" onClick={() => actions.respondTrade(t.id, false)}>Decline</Btn></div></div>; })}
+        {outgoing.map((t) => { const sh = getShift(t.shiftId); const to = getU(t.toUserId); if (!sh) return null;
+          return <div key={t.id} className="cw-card" style={{ display: "flex", alignItems: "center", gap: 10 }}><div style={{ flex: 1 }}><div style={{ fontSize: 13.5, color: C.ink }}>To <b>{to?.name}</b> · {sh.role}, {dlabel(sh.date)}</div><div style={{ fontSize: 12, color: t.status === "accepted" ? C.amber : C.muted, marginTop: 2 }}>{t.status === "accepted" ? "Accepted — awaiting approval" : "Waiting for them to accept"}</div></div>{t.status === "pending" && <Btn small variant="danger" onClick={() => actions.cancelTrade(t.id)}>Cancel</Btn>}</div>; })}
+      </div>
+    </div>
+  );
+}
+function ShiftModal({ db, shift, onClose, actions }) {
+  const isNew = !shift.id;
+  const staff = db.users.filter((u) => u.position !== "owner");
+  const [userId, setUserId] = useState(shift.userId || (staff[0] && staff[0].id) || db.users[0]?.id);
+  const [date, setDate] = useState(shift.date || todayKey());
+  const [start, setStart] = useState(shift.start || "09:00"); const [end, setEnd] = useState(shift.end || "17:00");
+  const [role, setRole] = useState(shift.role || db.roles[0]); const [notes, setNotes] = useState(shift.notes || "");
+  const rate = rateOf(db, userId); const proj = hoursBetween(start, end) * rate;
+  const dow = DOW[(new Date(date + "T00:00").getDay() + 6) % 7]; const av = db.availability?.[userId]?.[dow];
+  const onLeave = offOn(db, userId, date);
+  function save() { const payload = { date, start, end, userId, role, notes }; if (isNew) actions.addShift(payload); else actions.updateShift(shift.id, payload); onClose(); }
+  return (
+    <Modal title={isNew ? "Add shift" : "Edit shift"} onClose={onClose}>
+      <Field label="Staff member"><select style={inputStyle} value={userId} onChange={(e) => setUserId(e.target.value)}>{staff.map((e) => <option key={e.id} value={e.id}>{e.name} — {cap(e.position)}</option>)}</select></Field>
+      {av && <div style={{ marginTop: -6, marginBottom: 12, fontSize: 12, color: av.on ? C.green : C.danger, display: "flex", gap: 6, alignItems: "center" }}><Info size={13} />{av.on ? `Available ${fmtTime(av.s)}–${fmtTime(av.e)} on ${dow}` : `Marked unavailable on ${dow}`}</div>}
+      {onLeave && <div style={{ marginTop: -4, marginBottom: 12, fontSize: 12, color: C.danger, display: "flex", gap: 6, alignItems: "center" }}><CalendarOff size={13} /> This person has approved time off on this date.</div>}
+      <Field label="Date"><input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <div style={{ display: "flex", gap: 10 }}><div style={{ flex: 1 }}><Field label="Start"><input type="time" style={inputStyle} value={start} onChange={(e) => setStart(e.target.value)} /></Field></div><div style={{ flex: 1 }}><Field label="End"><input type="time" style={inputStyle} value={end} onChange={(e) => setEnd(e.target.value)} /></Field></div></div>
+      <Field label="Role this shift"><select style={inputStyle} value={role} onChange={(e) => setRole(e.target.value)}>{db.roles.map((r) => <option key={r}>{r}</option>)}</select></Field>
+      <Field label="Notes (optional)"><input style={inputStyle} value={notes} placeholder="e.g. open the case" onChange={(e) => setNotes(e.target.value)} /></Field>
+      <div style={{ background: C.boneSoft, borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: C.muted, marginBottom: 16 }}>{hoursBetween(start, end)}h × {money(rate)}/hr · projected base <b style={{ color: C.ink }}>{money(proj)}</b></div>
+      <div style={{ display: "flex", gap: 9, justifyContent: "space-between" }}>{!isNew ? <Btn variant="danger" small onClick={() => { actions.deleteShift(shift.id); onClose(); }}><Trash2 size={14} /> Delete</Btn> : <span />}<div style={{ display: "flex", gap: 9 }}><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>{isNew ? "Add shift" : "Save"}</Btn></div></div>
+    </Modal>
+  );
+}
+
+/* ---------------- AVAILABILITY ---------------- */
+function AvailabilityView({ db, me, isEmployer, actions }) {
+  if (isEmployer) return (<div><AvailabilityGrid db={db} /><TimeOffManager db={db} actions={actions} /></div>);
+  return (<div><AvailabilityEditor db={db} me={me} actions={actions} /><MyTimeOff db={db} me={me} actions={actions} /></div>);
+}
+function AvailabilityEditor({ db, me, actions }) {
+  const av = db.availability?.[me.id] || {};
+  return (
+    <div>
+      <SectionTitle title="My availability" sub="Set a weekly pattern. Managers see this when building shifts." />
+      <div style={{ display: "grid", gap: 8 }}>{DOW.map((dow) => { const day = av[dow] || { on: false, s: "09:00", e: "17:00" };
+        return <div key={dow} className="cw-card" style={{ padding: "12px 14px" }}><div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 38, fontWeight: 700, color: C.ink, fontSize: 13.5 }}>{dow}</div>
+          <Toggle on={day.on} onClick={() => actions.setAvailability(me.id, dow, { on: !day.on, s: day.s || "09:00", e: day.e || "17:00" })} />
+          <span style={{ fontSize: 12.5, color: day.on ? C.maroon : C.muted, width: 70 }}>{day.on ? "Available" : "Off"}</span>
+          <div style={{ flex: 1 }} />
+          {day.on && <div style={{ display: "flex", alignItems: "center", gap: 6 }}><input type="time" value={day.s || "09:00"} onChange={(e) => actions.setAvailability(me.id, dow, { on: true, s: e.target.value, e: day.e || "17:00" })} style={{ ...inputStyle, width: 110, padding: "6px 8px" }} /><span style={{ color: C.muted }}>–</span><input type="time" value={day.e || "17:00"} onChange={(e) => actions.setAvailability(me.id, dow, { on: true, s: day.s || "09:00", e: e.target.value })} style={{ ...inputStyle, width: 110, padding: "6px 8px" }} /></div>}
+        </div></div>; })}</div>
+    </div>
+  );
+}
+function AvailabilityGrid({ db }) {
+  const staff = db.users.filter((u) => u.position !== "owner");
+  return (
+    <div>
+      <SectionTitle title="Team availability" sub="Weekly pattern submitted by each person." />
+      <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 12, background: C.card }}>
+        <table className="cw-table"><thead><tr><th style={{ textAlign: "left", position: "sticky", left: 0, background: C.card, zIndex: 1 }}>Staff</th>{DOW.map((d) => <th key={d}>{d}</th>)}</tr></thead>
+          <tbody>{staff.map((u) => { const av = db.availability?.[u.id] || {};
+            return <tr key={u.id}><td style={{ position: "sticky", left: 0, background: C.card }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Avatar user={u} size={24} /><span style={{ fontWeight: 600, fontSize: 13 }}>{u.name}</span></div></td>{DOW.map((dow) => { const day = av[dow]; return <td key={dow} style={{ textAlign: "center" }}>{day?.on ? <span style={{ fontSize: 11, color: C.maroon, fontWeight: 600 }}>{fmtTime(day.s)}<br />{fmtTime(day.e)}</span> : <span style={{ color: C.silver }}>—</span>}</td>; })}</tr>; })}</tbody>
+        </table>
+      </div>
+      <p style={{ fontSize: 12, color: C.muted, marginTop: 10 }}>Maroon times are when the person can be scheduled.</p>
+    </div>
+  );
+}
+
+/* ---------------- CHAT ---------------- */
+function ChatView({ db, me, actions }) {
+  const myChannels = db.channels.filter((c) => c.members.includes(me.id));
+  const [activeId, setActiveId] = useState(myChannels[0]?.id);
+  const [draft, setDraft] = useState(""); const scrollRef = useRef(null);
+  const active = db.channels.find((c) => c.id === activeId) || myChannels[0];
+  const msgs = db.messages.filter((m) => m.channelId === active?.id);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [msgs.length, activeId]);
+  function send() { const text = draft.trim(); if (!text || !active) return; actions.sendMessage(active.id, text); setDraft(""); }
+  const userById = (id) => db.users.find((u) => u.id === id);
+  return (
+    <div>
+      <SectionTitle title="Chat" sub="Group channels for the team." />
+      <div className="cw-chips">{myChannels.map((c) => <button key={c.id} onClick={() => setActiveId(c.id)} className="cw-chip" style={{ background: c.id === active?.id ? C.maroon : C.card, color: c.id === active?.id ? C.boneSoft : C.ink, borderColor: c.id === active?.id ? C.maroon : C.line }}><Hash size={13} /> {c.name}</button>)}</div>
+      <div className="cw-chatbox">
+        <div ref={scrollRef} className="cw-msgs">
+          {msgs.length === 0 && <Empty icon={<MessageSquare size={28} />} text="No messages yet." />}
+          {msgs.map((m, i) => { const u = userById(m.userId); const mine = m.userId === me.id; const prev = msgs[i - 1]; const showHead = !prev || prev.userId !== m.userId;
+            return <div key={m.id} style={{ display: "flex", flexDirection: mine ? "row-reverse" : "row", gap: 8, marginTop: showHead ? 12 : 3 }}><div style={{ width: 28 }}>{showHead && !mine && <Avatar user={u} size={28} />}</div><div style={{ maxWidth: "74%" }}>{showHead && <div style={{ fontSize: 11, color: C.muted, marginBottom: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : u?.name} · {new Date(m.ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</div>}<div className="cw-bubble" style={{ background: mine ? C.maroon : "#fff", color: mine ? "#fff" : C.ink, borderColor: mine ? C.maroon : C.line }}>{m.text}</div></div></div>; })}
+        </div>
+        <div className="cw-composer"><input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={`Message ${active?.name || ""}`} style={{ ...inputStyle, border: "none", background: "transparent", flex: 1 }} /><Btn small onClick={send} disabled={!draft.trim()}><Send size={15} /></Btn></div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- PAY ---------------- */
+function PayView({ db, me, isEmployer, actions }) {
+  if (isEmployer) return <PayrollView db={db} actions={actions} />;
+  return <MyPayView db={db} me={me} actions={actions} />;
+}
+function PayrollView({ db, actions }) {
+  const [offset, setOffset] = useState(0);
+  const week = weekDates(offset); const weekKeys = week.map(toKey);
+  const [tipsModal, setTipsModal] = useState(false);
+  const weekShifts = db.shifts.filter((s) => weekKeys.includes(s.date)).sort((a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start));
+  const byUser = {}; weekShifts.forEach((s) => { (byUser[s.userId] = byUser[s.userId] || []).push(s); });
+  const userById = (id) => db.users.find((u) => u.id === id);
+  const sBase = (s) => hoursBetween(s.start, s.end) * rateOf(db, s.userId);
+  const sTotal = (s) => sBase(s) + (payFor(db, s.id).tips || 0);
+  const allPaid = weekShifts.length > 0 && weekShifts.every((s) => payFor(db, s.id).paid);
+  const somePaid = weekShifts.some((s) => payFor(db, s.id).paid);
+  const status = weekShifts.length === 0 ? { c: C.silver, bg: C.silverLt, fg: C.steel, t: "No shifts this week" } : allPaid ? { c: C.green, bg: C.greenSoft, fg: C.green, t: "Everyone paid — week complete" } : somePaid ? { c: C.amber, bg: C.amberSoft, fg: C.amber, t: "Partially paid" } : { c: C.muted, bg: C.boneSoft, fg: C.steel, t: "Not paid yet" };
+  const teamWages = weekShifts.reduce((a, s) => a + sBase(s), 0);
+  const teamTips = weekShifts.reduce((a, s) => a + (payFor(db, s.id).tips || 0), 0);
+  return (
+    <div>
+      <SectionTitle title="Payroll" sub="Wages, tips, and a record of who's been paid." action={<Btn small variant="steel" onClick={() => setTipsModal(true)}><CircleDollarSign size={15} /> Tips</Btn>} />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}><button className="cw-nav" onClick={() => setOffset((o) => o - 1)}><ChevronLeft size={18} /></button><div style={{ fontWeight: 700, color: C.ink, fontSize: 13.5 }}>Pay week · {weekLabel(week)}</div><button className="cw-nav" onClick={() => setOffset((o) => o + 1)}><ChevronRight size={18} /></button></div>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "11px 14px", borderRadius: 11, background: status.bg, border: `1px solid ${status.c}33`, marginBottom: 14 }}><span style={{ width: 11, height: 11, borderRadius: 9, background: status.c, flexShrink: 0 }} /><span style={{ fontWeight: 700, fontSize: 13.5, color: status.fg, flex: 1 }}>{status.t}</span><span style={{ fontSize: 12, color: status.fg }}>{money(teamWages + teamTips)} total</span></div>
+      {weekShifts.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: C.muted, marginBottom: 8 }}>Paid calendar · days worked</div>
+          <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 12, background: C.card }}>
+            <table className="cw-table"><thead><tr><th style={{ textAlign: "left", position: "sticky", left: 0, background: C.card }}>Staff</th>{week.map((d, i) => <th key={i}>{DOW[i]}<br /><span style={{ fontWeight: 400, color: C.silver }}>{d.getDate()}</span></th>)}</tr></thead>
+              <tbody>{Object.entries(byUser).map(([userId, shifts]) => { const u = userById(userId);
+                return <tr key={userId}><td style={{ position: "sticky", left: 0, background: C.card }}><div style={{ display: "flex", alignItems: "center", gap: 7 }}><Avatar user={u} size={22} /><span style={{ fontWeight: 600, fontSize: 12.5 }}>{u?.name}</span></div></td>{week.map((d, i) => { const dk = toKey(d); const ds = shifts.filter((s) => s.date === dk); if (ds.length === 0) return <td key={i} />; const hrs = ds.reduce((a, s) => a + hoursBetween(s.start, s.end), 0); const paid = ds.every((s) => payFor(db, s.id).paid); return <td key={i} style={{ textAlign: "center", padding: 4 }}><div style={{ background: paid ? C.greenSoft : C.amberSoft, color: paid ? C.green : C.amber, borderRadius: 7, padding: "5px 2px", fontSize: 11, fontWeight: 700 }}>{hrs}h{paid && <Check size={11} style={{ display: "block", margin: "1px auto 0" }} />}</div></td>; })}</tr>; })}</tbody>
+            </table>
+          </div>
+          <div style={{ display: "flex", gap: 14, marginTop: 8, fontSize: 11.5, color: C.muted }}><span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 11, height: 11, borderRadius: 3, background: C.greenSoft, border: `1px solid ${C.green}55` }} /> Paid</span><span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 11, height: 11, borderRadius: 3, background: C.amberSoft, border: `1px solid ${C.amber}55` }} /> Worked, unpaid</span></div>
+        </div>
+      )}
+      {Object.keys(byUser).length === 0 ? <Empty icon={<Wallet size={30} />} text="No shifts in this pay week." /> : (
+        <div style={{ display: "grid", gap: 14 }}>{Object.entries(byUser).map(([userId, shifts]) => { const u = userById(userId); const base = shifts.reduce((a, s) => a + sBase(s), 0); const tips = shifts.reduce((a, s) => a + (payFor(db, s.id).tips || 0), 0); const total = base + tips; const hrs = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0); const userPaid = shifts.every((s) => payFor(db, s.id).paid);
+          return <div key={userId} className="cw-card" style={{ padding: 0, overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "13px 15px", background: userPaid ? C.greenSoft : C.boneSoft, borderBottom: `1px solid ${C.line}` }}><Avatar user={u} size={34} /><div style={{ flex: 1 }}><div style={{ fontWeight: 700, color: C.ink, fontSize: 14.5 }}>{u?.name}</div><div style={{ fontSize: 12, color: C.muted, display: "flex", alignItems: "center", gap: 5 }}>{u?.method === "Cash" ? <Banknote size={12} /> : <CreditCard size={12} />}{u?.method}{u?.handle ? ` · ${u.handle}` : ""}</div></div><div style={{ textAlign: "right" }}><div style={{ fontFamily: "Fraunces, serif", fontSize: 22, fontWeight: 600, color: C.ink }}>{money(total)}</div><div style={{ fontSize: 11, color: C.muted }}>{hrs}h · {money(base)} + {money(tips)} tips</div></div></div>
+            <div style={{ padding: "4px 15px 12px" }}>
+              {shifts.map((s) => { const p = payFor(db, s.id);
+                return <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.boneSoft}` }}><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 13, color: C.ink, fontWeight: 600 }}>{dlabel(s.date)} · {s.role}</div><div style={{ fontSize: 11.5, color: C.muted }}>{hoursBetween(s.start, s.end)}h × {money(rateOf(db, s.userId))} = {money(sBase(s))}{p.tips ? ` + ${money(p.tips)} tips` : ""}</div></div><input type="number" min="0" step="1" defaultValue={p.tips || ""} placeholder="tips" onBlur={(e) => actions.setTip(s.id, parseFloat(e.target.value) || 0)} style={{ ...inputStyle, width: 64, padding: "5px 7px", fontSize: 12.5 }} /><div style={{ width: 64, textAlign: "right", fontWeight: 700, fontSize: 13, color: C.ink }}>{money(sTotal(s))}</div></div>; })}
+              <div style={{ display: "flex", alignItems: "center", gap: 11, paddingTop: 12 }}><Toggle on={userPaid} color={C.green} onClick={() => actions.setWeekPaid(shifts.map((s) => s.id), !userPaid)} /><div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 13, color: userPaid ? C.green : C.ink }}>{userPaid ? "Paid for the week" : "Mark paid"}</div><div style={{ fontSize: 11.5, color: C.muted }}>{userPaid ? "They get a paid notification" : "Slide when their money has gone out"}</div></div><AffirmCluster shifts={shifts} db={db} /></div>
+            </div>
+          </div>; })}</div>
+      )}
+      {tipsModal && <TipsModal db={db} weekKeys={weekKeys} onClose={() => setTipsModal(false)} actions={actions} />}
+    </div>
+  );
+}
+function MyPayView({ db, me, actions }) {
+  const [offset, setOffset] = useState(0);
+  const week = weekDates(offset); const weekKeys = week.map(toKey);
+  const shifts = db.shifts.filter((s) => weekKeys.includes(s.date) && s.userId === me.id).sort((a, b) => a.date.localeCompare(b.date));
+  const sBase = (s) => hoursBetween(s.start, s.end) * me.rate;
+  const base = shifts.reduce((a, s) => a + sBase(s), 0);
+  const tips = shifts.reduce((a, s) => a + (payFor(db, s.id).tips || 0), 0);
+  const total = base + tips; const hrs = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0);
+  const paid = shifts.length > 0 && shifts.every((s) => payFor(db, s.id).paid);
+  const iAffirmed = shifts.length > 0 && shifts.every((s) => payFor(db, s.id).affirmed.includes(me.id));
+  return (
+    <div>
+      <SectionTitle title="My pay" sub="Only you and management can see this." />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}><button className="cw-nav" onClick={() => setOffset((o) => o - 1)}><ChevronLeft size={18} /></button><div style={{ fontWeight: 700, color: C.ink, fontSize: 13.5 }}>{weekLabel(week)}</div><button className="cw-nav" onClick={() => setOffset((o) => o + 1)}><ChevronRight size={18} /></button></div>
+      <div className="cw-card" style={{ marginBottom: 14, textAlign: "center", padding: "18px 14px", background: paid ? C.greenSoft : C.card }}><div style={{ fontSize: 12, color: C.muted, textTransform: "uppercase", letterSpacing: ".06em" }}>Estimated this week</div><div style={{ fontFamily: "Fraunces, serif", fontSize: 38, fontWeight: 600, color: C.ink, margin: "4px 0" }}>{money(total)}</div><div style={{ fontSize: 12.5, color: C.muted }}>{hrs}h · {money(base)} wages + {money(tips)} tips</div><div style={{ marginTop: 10 }}><span className="cw-pill" style={{ background: paid ? "#fff" : C.silverLt, color: paid ? C.green : C.steel }}>{paid ? <><CircleCheck size={12} /> Marked paid by management</> : "Not paid yet"}</span></div></div>
+      {shifts.length === 0 ? <Empty icon={<Wallet size={30} />} text="No shifts this week." /> : (
+        <div className="cw-card" style={{ marginBottom: 14 }}>{shifts.map((s, i) => { const p = payFor(db, s.id);
+          return <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: i < shifts.length - 1 ? `1px solid ${C.boneSoft}` : "none" }}><div style={{ flex: 1 }}><div style={{ fontSize: 13, color: C.ink, fontWeight: 600 }}>{dlabel(s.date)} · {s.role}</div><div style={{ fontSize: 11.5, color: C.muted }}>{hoursBetween(s.start, s.end)}h × {money(me.rate)}{p.tips ? ` + ${money(p.tips)} tips` : ""}</div></div><div style={{ fontWeight: 700, fontSize: 13, color: C.ink }}>{money(sBase(s) + (p.tips || 0))}</div></div>; })}</div>
+      )}
+      {shifts.length > 0 && <div className="cw-card" style={{ display: "flex", alignItems: "center", gap: 11 }}><Toggle on={iAffirmed} color={C.green} onClick={() => shifts.forEach((s) => actions.affirmPay(s.id, !iAffirmed))} /><div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 13, color: iAffirmed ? C.green : C.ink }}>{iAffirmed ? "You confirmed you got paid" : "Confirm you got paid"}</div><div style={{ fontSize: 11.5, color: C.muted }}>Lets management know the money landed.</div></div></div>}
+    </div>
+  );
+}
+function AffirmCluster({ shifts, db }) {
+  const ids = new Set(); shifts.forEach((s) => payFor(db, s.id).affirmed.forEach((a) => ids.add(a)));
+  const people = [...ids].map((id) => db.users.find((u) => u.id === id)).filter(Boolean);
+  if (people.length === 0) return null;
+  return <div style={{ display: "flex", alignItems: "center", gap: 5 }} title={people.map((p) => p.name).join(", ") + " confirmed"}><span style={{ fontSize: 11, color: C.green }}>Confirmed</span><div style={{ display: "flex" }}>{people.slice(0, 4).map((p, i) => <div key={p.id} style={{ marginLeft: i ? -7 : 0, border: "2px solid #fff", borderRadius: "50%" }}><Avatar user={p} size={20} /></div>)}</div></div>;
+}
+function TipsModal({ db, weekKeys, onClose, actions }) {
+  const shifts = db.shifts.filter((s) => weekKeys.includes(s.date));
+  const [pool, setPool] = useState("");
+  function distribute() { const amt = parseFloat(pool) || 0; if (!amt || shifts.length === 0) return; const totalHours = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0); shifts.forEach((s) => { const share = totalHours ? (hoursBetween(s.start, s.end) / totalHours) * amt : 0; actions.setTip(s.id, Math.round(share * 100) / 100); }); onClose(); }
+  return (
+    <Modal title="Tips for the week" onClose={onClose}>
+      <div style={{ background: C.boneSoft, border: `1px solid ${C.line}`, borderRadius: 9, padding: "11px 13px", marginBottom: 16, fontSize: 12.5, color: C.muted, display: "flex", gap: 8 }}><Coffee size={16} style={{ flexShrink: 0, color: C.maroon }} /><span>Enter tips per shift on the payroll list, or pool the week's tips here and split them by hours worked.</span></div>
+      <Field label="Pooled tips this week ($)"><input type="number" min="0" style={inputStyle} value={pool} onChange={(e) => setPool(e.target.value)} placeholder="e.g. 480" /></Field>
+      <p style={{ fontSize: 12, color: C.muted, marginTop: -4 }}>Splits across {shifts.length} shift{shifts.length === 1 ? "" : "s"} proportionally to hours.</p>
+      <div style={{ display: "flex", gap: 9, justifyContent: "flex-end", marginTop: 8 }}><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={distribute} disabled={!pool}>Split by hours</Btn></div>
+    </Modal>
+  );
+}
+
+/* ---------------- NEWS ---------------- */
+function NewsView({ db, me, isEmployer, actions }) {
+  const [composing, setComposing] = useState(false);
+  const [title, setTitle] = useState(""); const [body, setBody] = useState("");
+  const list = [...db.announcements].sort((a, b) => b.ts - a.ts);
+  const userById = (id) => db.users.find((u) => u.id === id);
+  function post() { if (!title.trim() && !body.trim()) return; actions.postAnnouncement({ title: title.trim() || "Update", body: body.trim() }); setTitle(""); setBody(""); setComposing(false); }
+  return (
+    <div>
+      <SectionTitle title="Announcements" sub="Read these before your shift." action={isEmployer && <Btn small onClick={() => setComposing((c) => !c)}><Plus size={15} /> Post</Btn>} />
+      {composing && isEmployer && <div className="cw-card" style={{ marginBottom: 16 }}><Field label="Title"><input style={inputStyle} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Short headline" /></Field><Field label="Message"><textarea style={{ ...inputStyle, minHeight: 80, resize: "vertical" }} value={body} onChange={(e) => setBody(e.target.value)} placeholder="What does the team need to know?" /></Field><div style={{ display: "flex", gap: 9, justifyContent: "flex-end" }}><Btn variant="ghost" onClick={() => setComposing(false)}>Cancel</Btn><Btn onClick={post}>Post to team</Btn></div></div>}
+      {list.length === 0 ? <Empty icon={<Megaphone size={30} />} text="No announcements yet." /> : (
+        <div style={{ display: "grid", gap: 12 }}>{list.map((a) => { const u = userById(a.authorId);
+          return <div key={a.id} className="cw-card" style={{ borderTop: `3px solid ${C.maroon}` }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}><h4 style={{ fontFamily: "Fraunces, serif", fontSize: 17, color: C.ink, margin: "0 0 6px" }}>{a.title}</h4>{isEmployer && <button className="cw-iconbtn" onClick={() => actions.deleteAnnouncement(a.id)}><Trash2 size={14} /></button>}</div><p style={{ fontSize: 13.5, color: "#46383B", lineHeight: 1.55, margin: "0 0 10px" }}>{a.body}</p><div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: C.muted }}><Avatar user={u} size={20} /> {u?.name || "—"}<span>· {new Date(a.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span></div></div>; })}</div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- TEAM ---------------- */
+function TeamView({ db, me, isEmployer, actions }) {
+  if (!isEmployer) return <MyProfile db={db} me={me} actions={actions} />;
+  return <OwnerTeam db={db} me={me} actions={actions} />;
+}
+function MyProfile({ db, me, actions }) {
+  const [method, setMethod] = useState(me.method === "—" ? "Direct deposit" : me.method);
+  const [handle, setHandle] = useState(me.handle || "");
+  const dirty = method !== me.method || handle !== (me.handle || "");
+  return (
+    <div>
+      <SectionTitle title="My profile" sub="Your pay details stay private to you and management." />
+      <div className="cw-card" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 16 }}><Avatar user={me} size={48} /><div><div style={{ fontWeight: 700, fontSize: 16, color: C.ink }}>{me.name}</div><div style={{ fontSize: 13, color: C.muted }}>{cap(me.position)} · {money(me.rate)}/hr</div></div></div>
+        <Field label="Preferred payment method"><select style={inputStyle} value={method} onChange={(e) => setMethod(e.target.value)}>{PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}</select></Field>
+        {method !== "Cash" && method !== "Direct deposit" && <Field label={`${method} handle`}><input style={inputStyle} value={handle} onChange={(e) => setHandle(e.target.value)} placeholder="@username or email" /></Field>}
+        <Btn onClick={() => actions.updateMyProfile({ method, handle })} disabled={!dirty}>Save changes</Btn>
+      </div>
+      <div className="cw-card">
+        <div style={{ fontWeight: 700, fontSize: 13.5, color: C.ink, marginBottom: 8 }}>My roles</div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{(me.jobRoles.length ? me.jobRoles : ["—"]).map((r) => <span key={r} className="cw-pill" style={{ background: C.silverLt, color: C.steel }}>{r}</span>)}</div>
+        <p style={{ fontSize: 12, color: C.muted, marginTop: 9, marginBottom: 0 }}>Roles are set by your manager and decide what you can be assigned during a shift.</p>
+      </div>
+    </div>
+  );
+}
+function OwnerTeam({ db, me, actions }) {
+  const [roleDraft, setRoleDraft] = useState("");
+  const [editUser, setEditUser] = useState(null);
+  const [inviting, setInviting] = useState(false);
+  function addRole() { const r = roleDraft.trim(); if (!r || db.roles.includes(r)) return; actions.addRole(r); setRoleDraft(""); }
+  const ordered = [...db.users].sort((a, b) => POSITIONS.indexOf(a.position) - POSITIONS.indexOf(b.position));
+  return (
+    <div>
+      <SectionTitle title="Team & roles" sub="People, positions, pay, and what they can be assigned." action={<Btn small onClick={() => setInviting(true)}><UserPlus size={15} /> Invite</Btn>} />
+      <StoreLocationCard db={db} actions={actions} />
+      <div className="cw-card" style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5, color: C.ink, marginBottom: 9 }}>Assignable roles</div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 11 }}>{db.roles.map((r) => <span key={r} className="cw-pill" style={{ background: C.silverLt, color: C.steel, paddingRight: 6 }}>{r}<button onClick={() => actions.removeRole(r)} style={{ background: "none", border: "none", cursor: "pointer", color: C.steel, display: "flex", padding: 0, marginLeft: 2 }}><X size={12} /></button></span>)}</div>
+        <div style={{ display: "flex", gap: 8 }}><input style={{ ...inputStyle, flex: 1 }} value={roleDraft} onChange={(e) => setRoleDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addRole()} placeholder="Add a role (e.g. Dishwasher)" /><Btn onClick={addRole}><Plus size={15} /></Btn></div>
+      </div>
+      <div style={{ display: "grid", gap: 9 }}>
+        {ordered.map((u) => (
+          <button key={u.id} className="cw-card cw-rowbtn" onClick={() => setEditUser(u)}>
+            <Avatar user={u} size={36} />
+            <div style={{ flex: 1, textAlign: "left", minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}><span style={{ fontWeight: 700, color: C.ink, fontSize: 14.5 }}>{u.name}</span>{u.id === me.id && <span className="cw-pill" style={{ background: C.maroonSoft, color: C.maroon }}>You</span>}<PositionBadge position={u.position} /></div>
+              <div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>{u.rate ? `${money(u.rate)}/hr · ` : ""}{u.jobRoles.join(", ") || "no roles"}</div>
+            </div>
+            <Pencil size={15} color={C.muted} />
+          </button>
+        ))}
+      </div>
+      {editUser && <EditMemberModal db={db} me={me} member={editUser} onClose={() => setEditUser(null)} actions={actions} />}
+      {inviting && <InviteModal onClose={() => setInviting(false)} />}
+    </div>
+  );
+}
+function EditMemberModal({ db, me, member, onClose, actions }) {
+  const [name, setName] = useState(member.name);
+  const [rate, setRate] = useState(member.rate);
+  const [method, setMethod] = useState(member.method === "—" ? "Direct deposit" : member.method);
+  const [position, setPosition] = useState(member.position);
+  const [access, setAccess] = useState(member.access);
+  const [jobRoles, setJobRoles] = useState(member.jobRoles);
+  const [err, setErr] = useState("");
+  function toggleRole(r) { setJobRoles((j) => j.includes(r) ? j.filter((x) => x !== r) : [...j, r]); }
+  function pickPosition(p) { setPosition(p); setAccess(p === "employee" ? "employee" : "employer"); }
+  function save() {
+    const otherEmployers = db.users.filter((u) => u.id !== member.id && u.access === "employer").length;
+    if (access === "employee" && otherEmployers === 0) { setErr("There must be at least one employer."); return; }
+    const otherOwners = db.users.filter((u) => u.id !== member.id && u.position === "owner").length;
+    if (member.position === "owner" && position !== "owner" && otherOwners === 0) { setErr("There must be at least one owner."); return; }
+    actions.updateMember(member.id, { name, position, access, jobRoles, rate: parseFloat(rate) || 0, method });
+    onClose();
+  }
+  function remove() {
+    const otherEmployers = db.users.filter((u) => u.id !== member.id && u.access === "employer").length;
+    if (member.access === "employer" && otherEmployers === 0) { setErr("Can't remove the last employer."); return; }
+    actions.removeMember(member.id); onClose();
+  }
+  return (
+    <Modal title={`Edit ${member.name}`} onClose={onClose} wide>
+      <Field label="Name"><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+      <div style={{ display: "flex", gap: 10 }}><div style={{ flex: 1 }}><Field label="Rate $/hr"><input type="number" style={inputStyle} value={rate} onChange={(e) => setRate(e.target.value)} /></Field></div><div style={{ flex: 1.4 }}><Field label="Pays via"><select style={inputStyle} value={method} onChange={(e) => setMethod(e.target.value)}>{PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}</select></Field></div></div>
+      <Field label="Position"><div className="cw-seg">{POSITIONS.map((p) => <button key={p} className="cw-segbtn" style={segStyle(position === p)} onClick={() => pickPosition(p)}>{cap(p)}</button>)}</div></Field>
+      <Field label="Access level"><div style={{ display: "flex", alignItems: "center", gap: 11 }}><Toggle on={access === "employer"} onClick={() => setAccess(access === "employer" ? "employee" : "employer")} /><div><div style={{ fontWeight: 700, fontSize: 13.5, color: C.ink }}>{access === "employer" ? "Employer — full access" : "Employee — standard access"}</div><div style={{ fontSize: 11.5, color: C.muted }}>{access === "employer" ? "Can build schedules, run payroll, and manage the team." : "Can see schedule, set availability, and view their own pay."}</div></div></div></Field>
+      <Field label="Roles this person can work"><div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{db.roles.map((r) => { const on = jobRoles.includes(r); return <button key={r} onClick={() => toggleRole(r)} className="cw-pill" style={{ cursor: "pointer", border: `1px solid ${on ? C.maroon : C.line}`, background: on ? C.maroon : "#fff", color: on ? "#fff" : C.muted }}>{on && <Check size={12} />} {r}</button>; })}</div></Field>
+      {err && <div style={{ color: C.danger, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 9, justifyContent: "space-between" }}>{member.id !== me.id ? <Btn variant="danger" small onClick={remove}><Trash2 size={14} /> Remove</Btn> : <span />}<div style={{ display: "flex", gap: 9 }}><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>Save</Btn></div></div>
+    </Modal>
+  );
+}
+function InviteModal({ onClose }) {
+  const url = typeof window !== "undefined" ? window.location.origin : "";
+  return (
+    <Modal title="Invite a teammate" onClose={onClose}>
+      <p style={{ fontSize: 13, color: C.muted, marginTop: 0 }}>Share this link. They create their own account (as an Employee by default), then appear here for you to set their rate, roles, and — if needed — promote to manager.</p>
+      <div style={{ background: C.boneSoft, border: `1px solid ${C.line}`, borderRadius: 9, padding: "10px 12px", fontSize: 13, color: C.ink, wordBreak: "break-all", marginBottom: 14 }}>{url || "your-app-url.com"}</div>
+      <div style={{ fontSize: 12, color: C.steel, display: "flex", gap: 6 }}><Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />To keep it private, lock sign-ups to invited emails in your Supabase Auth settings.</div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}><Btn onClick={onClose}>Done</Btn></div>
+    </Modal>
+  );
+}
+
+/* ---------------- TIME CLOCK ---------------- */
+function ClockCard({ db, me, actions }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const open = (db.timeEntries || []).find((t) => t.userId === me.id && !t.out);
+  const [, setTick] = useState(0);
+  useEffect(() => { if (!open) return; const iv = setInterval(() => setTick((x) => x + 1), 30000); return () => clearInterval(iv); }, [open]);
+  const s = db.settings || {};
+  const isEmp = me.access === "employer";
+  // Employers can see settings; employees can't (privacy), so for them the
+  // distance check happens purely server-side inside the database trigger.
+  const employerKnowsUnset = isEmp && s.visible && s.lat == null;
+  async function act() {
+    setBusy(true); setErr("");
+    try {
+      const pos = await getPosition();
+      if (s.visible && s.lat != null) {
+        const d = milesBetween(pos.lat, pos.lng, s.lat, s.lng);
+        if (d > (s.radius || 1)) { setErr(`You're ${d.toFixed(1)} mi from the store — you need to be within ${s.radius} mi.`); setBusy(false); return; }
+      }
+      const res = open ? await actions.clockOut(open.id, pos.lat, pos.lng) : await actions.clockIn(pos.lat, pos.lng);
+      if (res?.error) setErr(res.error.message);
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+  return (
+    <div className="cw-card" style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 12, padding: "11px 13px", borderLeft: `4px solid ${open ? C.green : C.silver}`, flexWrap: "wrap" }}>
+      <Timer size={19} color={open ? C.green : C.steel} />
+      <div style={{ flex: 1, minWidth: 180 }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5, color: open ? C.green : C.ink }}>{open ? `Clocked in · ${fmtDur(Date.now() - open.in)}` : "Not clocked in"}</div>
+        <div style={{ fontSize: 11.5, color: C.muted }}>{employerKnowsUnset ? "Store location isn't set — set it in the Team tab first." : "Your location is checked when you clock in or out."}</div>
+        {err && <div style={{ fontSize: 12, color: C.danger, marginTop: 3 }}>{err}</div>}
+      </div>
+      <Btn small variant={open ? "ghost" : "green"} disabled={busy || employerKnowsUnset} onClick={act}>{busy ? "Locating…" : open ? "Clock out" : "Clock in"}</Btn>
+    </div>
+  );
+}
+
+function StoreLocationCard({ db, actions }) {
+  const s = db.settings || {};
+  const [addr, setAddr] = useState(s.address || "");
+  const [radius, setRadius] = useState(s.radius || 1);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const set = s.lat != null;
+  async function findAndSet() {
+    if (!addr.trim()) { setErr("Type the store address first."); return; }
+    setBusy(true); setErr("");
+    try {
+      const loc = await geocodeAddress(addr.trim());
+      const res = await actions.setStoreLocation(loc.lat, loc.lng, parseFloat(radius) || 1, loc.address);
+      if (res?.error) setErr(res.error.message);
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+  return (
+    <div className="cw-card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><MapPin size={16} color={C.maroon} /><span style={{ fontWeight: 700, fontSize: 13.5, color: C.ink }}>Store location (clock-in geofence)</span><span className="cw-pill" style={{ background: C.maroonSoft, color: C.maroon, marginLeft: "auto" }}><ShieldCheck size={11} /> Employers only</span></div>
+      <p style={{ fontSize: 12.5, color: C.muted, margin: "0 0 11px" }}>{set ? <>Set to <b style={{ color: C.ink }}>{s.address || "saved location"}</b> · staff can clock in within {s.radius} mi.</> : "Not set — nobody can clock in until you set this."}</p>
+      <Field label="Store address"><input style={inputStyle} value={addr} onChange={(e) => { setAddr(e.target.value); setErr(""); }} placeholder="682A Tremont St, Boston, MA" onKeyDown={(e) => e.key === "Enter" && findAndSet()} /></Field>
+      <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap" }}>
+        <Btn small onClick={findAndSet} disabled={busy}><MapPin size={14} /> {busy ? "Finding…" : set ? "Update location" : "Find & set location"}</Btn>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: C.muted }}>Radius <input type="number" min="0.1" step="0.1" value={radius} onChange={(e) => setRadius(e.target.value)} style={{ ...inputStyle, width: 70, padding: "5px 7px" }} /> mi</label>
+      </div>
+      {err && <div style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{err}</div>}
+      <div style={{ fontSize: 11.5, color: C.steel, marginTop: 9, display: "flex", gap: 6 }}><Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />Only employers can see or change this — staff can't view the address or coordinates; their clock-in is simply checked against it.</div>
+    </div>
+  );
+}
+
+/* ---------------- TIME OFF ---------------- */
+function MyTimeOff({ db, me, actions }) {
+  const [start, setStart] = useState(""); const [end, setEnd] = useState(""); const [reason, setReason] = useState("");
+  const [err, setErr] = useState("");
+  const mineList = (db.timeOff || []).filter((t) => t.userId === me.id && t.status !== "cancelled");
+  const statusPill = (s) => s === "approved" ? { bg: C.greenSoft, fg: C.green, t: "Approved" } : s === "denied" ? { bg: "#EFD9D7", fg: C.danger, t: "Denied" } : { bg: C.amberSoft, fg: C.amber, t: "Pending" };
+  async function submit() {
+    if (!start) { setErr("Pick a start date."); return; }
+    const e2 = end || start;
+    if (e2 < start) { setErr("End date is before start date."); return; }
+    setErr("");
+    const res = await actions.requestTimeOff({ start, end: e2, reason: reason.trim() });
+    if (res?.error) { setErr(res.error.message); return; }
+    setStart(""); setEnd(""); setReason("");
+  }
+  return (
+    <div style={{ marginTop: 22 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}><CalendarOff size={14} /> Time off</div>
+      <div className="cw-card" style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 130 }}><Field label="First day off"><input type="date" style={inputStyle} value={start} onChange={(e) => { setStart(e.target.value); setErr(""); }} /></Field></div>
+          <div style={{ flex: 1, minWidth: 130 }}><Field label="Last day off"><input type="date" style={inputStyle} value={end} onChange={(e) => { setEnd(e.target.value); setErr(""); }} /></Field></div>
+        </div>
+        <Field label="Reason (optional)"><input style={inputStyle} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. family trip" /></Field>
+        {err && <div style={{ color: C.danger, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+        <Btn small onClick={submit}><Plus size={14} /> Request time off</Btn>
+      </div>
+      {mineList.length > 0 && (
+        <div style={{ display: "grid", gap: 8 }}>
+          {mineList.map((t) => { const p = statusPill(t.status);
+            return <div key={t.id} className="cw-card" style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, color: C.ink }}>{dlabel(t.start)}{t.end !== t.start ? ` → ${dlabel(t.end)}` : ""}</div>
+                {t.reason && <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{t.reason}</div>}
+              </div>
+              <span className="cw-pill" style={{ background: p.bg, color: p.fg }}>{p.t}</span>
+              {t.status === "pending" && <Btn small variant="danger" onClick={() => actions.cancelTimeOff(t.id)}>Cancel</Btn>}
+            </div>; })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TimeOffManager({ db, actions }) {
+  const getU = (id) => db.users.find((u) => u.id === id);
+  const pending = (db.timeOff || []).filter((t) => t.status === "pending");
+  const upcoming = (db.timeOff || []).filter((t) => t.status === "approved" && t.end >= todayKey());
+  if (pending.length === 0 && upcoming.length === 0) return null;
+  return (
+    <div style={{ marginTop: 22 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}><CalendarOff size={14} /> Time off</div>
+      {pending.length > 0 && (
+        <div style={{ display: "grid", gap: 9, marginBottom: 14 }}>
+          {pending.map((t) => { const u = getU(t.userId);
+            return <div key={t.id} className="cw-card" style={{ borderLeft: `4px solid ${C.amber}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}><Avatar user={u} size={26} /><div style={{ fontSize: 13.5, color: C.ink }}><b>{u?.name}</b> requests {dlabel(t.start)}{t.end !== t.start ? ` → ${dlabel(t.end)}` : ""}{t.reason ? <span style={{ color: C.muted }}> · {t.reason}</span> : ""}</div></div>
+              <div style={{ display: "flex", gap: 9 }}><Btn small variant="green" onClick={() => actions.decideTimeOff(t.id, true)}><Check size={14} /> Approve</Btn><Btn small variant="danger" onClick={() => actions.decideTimeOff(t.id, false)}><X size={14} /> Deny</Btn></div>
+            </div>; })}
+        </div>
+      )}
+      {upcoming.length > 0 && (
+        <div className="cw-card">
+          <div style={{ fontWeight: 700, fontSize: 12.5, color: C.ink, marginBottom: 8 }}>Approved upcoming leave</div>
+          {upcoming.map((t) => { const u = getU(t.userId);
+            return <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", fontSize: 13, color: C.muted }}><Avatar user={u} size={20} /><span style={{ color: C.ink, fontWeight: 600 }}>{u?.name}</span> {dlabel(t.start)}{t.end !== t.start ? ` → ${dlabel(t.end)}` : ""}</div>; })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SectionTitle({ title, sub, action }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 16, gap: 12 }}>
+      <div><h2 style={{ fontFamily: "Fraunces, serif", fontSize: 24, color: C.ink, margin: 0, fontWeight: 600 }}>{title}</h2>{sub && <p style={{ fontSize: 13, color: C.muted, margin: "3px 0 0" }}>{sub}</p>}</div>
+      {action}
+    </div>
+  );
+}
+
+const CSS = `
+.cw-root{min-height:100vh;background:${C.bone};font-family:Inter,system-ui,sans-serif;display:flex;justify-content:center;-webkit-font-smoothing:antialiased;color:${C.ink};}
+.cw-frame{width:100%;max-width:880px;min-height:100vh;background:${C.bone};display:flex;flex-direction:column;box-shadow:0 0 60px rgba(0,0,0,.06);}
+.cw-header{background:${C.maroon};padding:14px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:20;}
+.cw-me{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.16);border-radius:30px;padding:4px 11px 4px 4px;cursor:pointer;}
+.cw-me:hover{background:rgba(255,255,255,.18);}
+.cw-bell{position:relative;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.16);display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.cw-bell:hover{background:rgba(255,255,255,.18);}
+.cw-badge{position:absolute;top:-3px;right:-3px;background:${C.amber};color:#fff;font-size:10px;font-weight:700;min-width:16px;height:16px;border-radius:9px;display:flex;align-items:center;justify-content:center;padding:0 3px;border:2px solid ${C.maroon};}
+.cw-backdrop{position:fixed;inset:0;z-index:30;}
+.cw-menu{position:absolute;right:0;top:44px;background:#fff;border:1px solid ${C.line};border-radius:12px;box-shadow:0 12px 34px rgba(0,0,0,.16);padding:8px;min-width:210px;z-index:40;}
+.cw-menuitem{display:flex;align-items:center;gap:9px;width:100%;padding:8px;border:none;background:none;border-radius:8px;cursor:pointer;}
+.cw-menuitem:hover{background:${C.bone};}
+.cw-tabs{display:flex;gap:2px;background:${C.card};border-bottom:1px solid ${C.line};padding:0 8px;overflow-x:auto;position:sticky;top:56px;z-index:15;}
+.cw-tabs::-webkit-scrollbar{display:none;}
+.cw-tab{display:flex;flex-direction:column;align-items:center;gap:3px;background:none;border:none;padding:10px 13px 8px;cursor:pointer;font-size:11px;font-weight:600;font-family:inherit;white-space:nowrap;}
+.cw-main{padding:20px 18px 60px;flex:1;}
+.cw-card{background:${C.card};border:1px solid ${C.line};border-radius:13px;padding:14px;}
+.cw-rowbtn{display:flex;align-items:center;gap:11px;cursor:pointer;text-align:left;font-family:inherit;}
+.cw-rowbtn:hover{border-color:${C.maroon};}
+.cw-btn:hover{filter:brightness(.97);}
+.cw-pill{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;padding:3px 9px;border-radius:30px;line-height:1.4;}
+.cw-iconbtn{background:none;border:1px solid ${C.line};border-radius:8px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:${C.muted};flex-shrink:0;}
+.cw-iconbtn:hover{color:${C.maroon};border-color:${C.maroon};}
+.cw-nav{background:${C.card};border:1px solid ${C.line};border-radius:9px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:${C.ink};}
+.cw-nav:hover{background:#fff;border-color:${C.maroon};color:${C.maroon};}
+.cw-weekstrip{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;}
+.cw-daycell{display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px 2px 7px;border:1px solid ${C.line};border-radius:11px;cursor:pointer;}
+.cw-toggle{position:relative;width:38px;height:20px;border-radius:30px;border:none;cursor:pointer;flex-shrink:0;transition:background .15s;}
+.cw-knob{position:absolute;top:2px;width:16px;height:16px;background:#fff;border-radius:50%;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.2);}
+.cw-table{width:100%;border-collapse:collapse;font-size:12px;}
+.cw-table th,.cw-table td{padding:9px;border-bottom:1px solid ${C.line};}
+.cw-table th{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:${C.muted};font-weight:700;text-align:center;}
+.cw-chips{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:13px;}
+.cw-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid ${C.line};border-radius:30px;padding:6px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
+.cw-chatbox{background:${C.card};border:1px solid ${C.line};border-radius:14px;display:flex;flex-direction:column;height:62vh;overflow:hidden;}
+.cw-msgs{flex:1;overflow-y:auto;padding:14px;}
+.cw-bubble{padding:8px 12px;border-radius:13px;font-size:13.5px;line-height:1.45;border:1px solid;word-break:break-word;}
+.cw-composer{display:flex;align-items:center;gap:8px;border-top:1px solid ${C.line};padding:8px 10px;background:${C.boneSoft};}
+.cw-overlay{position:fixed;inset:0;background:rgba(40,20,25,.45);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;z-index:60;overflow-y:auto;}
+.cw-modal{background:${C.bone};border-radius:16px;padding:22px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.3);}
+.cw-x{background:none;border:none;cursor:pointer;color:${C.muted};display:flex;padding:4px;border-radius:6px;}
+.cw-x:hover{background:rgba(0,0,0,.06);}
+.cw-seg{display:flex;gap:4px;background:${C.silverLt};border-radius:10px;padding:3px;}
+.cw-segbtn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;}
+.cw-choice{font-family:inherit;}
+.cw-choice:hover{border-color:${C.maroon};}
+.cw-link{background:none;border:none;color:${C.maroon};font-weight:700;cursor:pointer;font-family:inherit;font-size:13px;padding:0;}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid ${C.maroon};outline-offset:1px;}
+@media (max-width:520px){.cw-tab span{font-size:10px;}.cw-main{padding:16px 13px 60px;}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;}}
+`;
+
+
+createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
