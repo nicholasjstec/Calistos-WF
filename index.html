@@ -37,7 +37,7 @@
     }
   }, 15000);
 </script>
-<script type="text/babel" data-type="module" data-presets="react">
+<script type="text/plain" id="calisto-source">
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "https://esm.sh/react@18.3.1";
 import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -1248,5 +1248,44 @@ input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid $
 
 createRoot(document.getElementById("root")).render(<App />);
 </script>
+<script>
+(async function() {
+  function showBootError(msg) {
+    var b = document.getElementById("boot");
+    if (!b) return;
+    b.innerHTML = "<div style='max-width:520px;margin:0 auto;text-align:left'>" +
+      "<div style='font-weight:700;color:#9B3A34;margin-bottom:10px'>Something didn't load:</div>" +
+      "<pre style='font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-word;background:#f4efe4;padding:12px;border-radius:8px;color:#281A1D;max-height:340px;overflow:auto'>" +
+      String(msg).replace(/</g, "&lt;") + "</pre>" +
+      "<div style='margin-top:14px;font-size:13px;color:#8A8174'>Screenshot this whole box and send it back.</div></div>";
+  }
+  window.addEventListener("error", function (e) {
+    if (e && e.error && e.error.stack) showBootError(e.error.stack);
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason;
+    showBootError((r && r.stack) ? r.stack : (r && r.message) ? r.message : String(r));
+  });
+  var stuckTimer = setTimeout(function () {
+    var b = document.getElementById("boot");
+    if (b) showBootError("Still loading after 20 seconds — likely a slow connection. " +
+      "Try Wi-Fi if you're on cellular, then reload the page.");
+  }, 20000);
+
+  try {
+    var src = document.getElementById("calisto-source").textContent;
+    if (typeof Babel === "undefined") throw new Error("Babel failed to load from cdnjs.cloudflare.com — check your connection and reload.");
+    var transformed = Babel.transform(src, { presets: ["react"], sourceType: "module" }).code;
+    var blob = new Blob([transformed], { type: "text/javascript" });
+    var url = URL.createObjectURL(blob);
+    await import(url);
+    clearTimeout(stuckTimer);
+  } catch (err) {
+    clearTimeout(stuckTimer);
+    showBootError((err && err.stack) ? err.stack : (err && err.message) ? err.message : String(err));
+  }
+})();
+</script>
+
 </body>
 </html>
