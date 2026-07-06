@@ -10,6 +10,33 @@
 </head>
 <body>
 <div id="root"><div id="boot">Opening CALISTO'S…</div></div>
+<script>
+  function showBootError(msg) {
+    var b = document.getElementById("boot");
+    if (b) {
+      b.innerHTML = "<div style='max-width:480px;margin:0 auto;text-align:left'>" +
+        "<div style='font-weight:700;color:#9B3A34;margin-bottom:10px'>Something didn't load:</div>" +
+        "<div style='font-family:monospace;font-size:13px;white-space:pre-wrap;background:#f4efe4;padding:12px;border-radius:8px;color:#281A1D'>" +
+        msg.replace(/</g, "&lt;") + "</div>" +
+        "<div style='margin-top:14px;font-size:13px;color:#8A8174'>Screenshot this and send it back.</div></div>";
+    }
+  }
+  window.addEventListener("error", function (e) {
+    showBootError((e.message || "Unknown error") + (e.filename ? "\n" + e.filename + ":" + e.lineno : ""));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    showBootError("Promise error: " + (e.reason && e.reason.message ? e.reason.message : String(e.reason)));
+  });
+  // If nothing has replaced #boot after 15s, the load is stuck (not just slow).
+  setTimeout(function () {
+    var b = document.getElementById("boot");
+    if (b && b.textContent.indexOf("Opening") === 0) {
+      showBootError("Still loading after 15 seconds. This usually means a slow connection " +
+        "(try Wi-Fi instead of cellular) or one of the app's pieces failed to load from the internet. " +
+        "Try reloading the page.");
+    }
+  }, 15000);
+</script>
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "https://esm.sh/react@18.3.1";
 import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
