@@ -214,7 +214,7 @@ const C = {
 };
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const DOW_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const PAYMENT_METHODS = ["Venmo", "Apple Pay", "Zelle", "Cash App", "Direct deposit", "Check", "Cash", "Other"];
+const PAYMENT_METHODS = ["Cash App", "Venmo", "Apple Pay", "Direct Deposit", "Check"];
 const POSITIONS = ["owner", "manager", "employee"];
 const pad = (n) => String(n).padStart(2, "0");
 const toKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -1714,7 +1714,7 @@ function TeamView({ db, me, isEmployer, actions }) {
     return React.createElement(OwnerTeam, { db: db, me: me, actions: actions });
 }
 function MyProfile({ db, me, actions }) {
-    const [method, setMethod] = useState(me.method === "—" ? "Direct deposit" : me.method);
+    const [method, setMethod] = useState(PAYMENT_METHODS.includes(me.method) ? me.method : "Venmo");
     const [handle, setHandle] = useState(me.handle || "");
     const dirty = method !== me.method || handle !== (me.handle || "");
     return (React.createElement("div", null,
@@ -1729,9 +1729,10 @@ function MyProfile({ db, me, actions }) {
                         " \u00B7 ",
                         money(me.rate),
                         "/hr"))),
-            React.createElement("p", { style: { fontSize: 11.5, color: C.muted, margin: "2px 0 12px" } }, "Payment method is set by each person in their own profile (Team tab)."),
-            method !== "Cash" && React.createElement(Field, { label: "Account name / number" },
-                React.createElement("input", { style: inputStyle, value: handle, onChange: (e) => setHandle(e.target.value), placeholder: method === "Apple Pay" ? "Phone number for Apple Pay" : method === "Venmo" ? "@your-venmo-name" : method === "Direct deposit" ? "Bank + account info" : "Name, @handle, or number" })),
+            React.createElement(Field, { label: "How do you want to be paid?" },
+                React.createElement("select", { style: inputStyle, value: method, onChange: (e) => setMethod(e.target.value) }, PAYMENT_METHODS.map((m) => React.createElement("option", { key: m }, m)))),
+            React.createElement(Field, { label: method === "Cash App" ? "Your $cashtag" : method === "Venmo" ? "Your Venmo name" : method === "Apple Pay" ? "Phone number for Apple Pay" : method === "Direct Deposit" ? "Bank, routing & account number" : "Name to write on the check" },
+                React.createElement("input", { style: inputStyle, value: handle, onChange: (e) => setHandle(e.target.value), placeholder: method === "Cash App" ? "$yourname" : method === "Venmo" ? "@your-venmo-name" : method === "Apple Pay" ? "(617) 555-0100" : method === "Direct Deposit" ? "Bank · routing · account" : "First Last" })),
             React.createElement("p", { style: { fontSize: 11.5, color: C.muted, marginTop: -4, marginBottom: 12 } }, "Only you can change this. Management sees it so they can pay you."),
             React.createElement(Btn, { onClick: () => actions.updateMyProfile({ method, handle }), disabled: !dirty }, "Save changes")),
         React.createElement("div", { className: "cw-card" },
@@ -1812,6 +1813,12 @@ function EditMemberModal({ db, me, member, onClose, actions }) {
             React.createElement("input", { style: inputStyle, value: name, onChange: (e) => setName(e.target.value) })),
         React.createElement(Field, { label: "Rate $/hr" },
             React.createElement("input", { type: "number", style: inputStyle, value: rate, onChange: (e) => setRate(e.target.value) })),
+        React.createElement("div", { style: { background: C.boneSoft, borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: C.ink, marginBottom: 12 } },
+            React.createElement("b", null, "Pays via:"),
+            " ",
+            member.method || "\u2014",
+            member.handle ? ` \u00b7 ${member.handle}` : "",
+            React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 2 } }, "Each person sets this themselves in their own profile.")),
         React.createElement(Field, { label: "Position" },
             React.createElement("div", { className: "cw-seg" }, POSITIONS.map((p) => React.createElement("button", { key: p, className: "cw-segbtn", style: segStyle(position === p), onClick: () => pickPosition(p) }, cap(p))))),
         React.createElement(Field, { label: "Access level" },
