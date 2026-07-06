@@ -125,7 +125,7 @@ async function loadAll() {
         published: pubMap,
         notifications: (notifs.data || []).map((n) => ({ id: n.id, userId: n.user_id, type: n.type, text: n.body, ts: new Date(n.created_at).getTime(), read: n.read })),
         announcements: (anns.data || []).map((a) => ({ id: a.id, authorId: a.author_id, title: a.title, body: a.body || "", ts: new Date(a.created_at).getTime() })),
-        channels: (channels.data || []).map((c) => ({ id: c.id, name: c.name, members: (cmembers.data || []).filter((m) => m.channel_id === c.id).map((m) => m.user_id) })),
+        channels: (channels.data || []).map((c) => ({ id: c.id, name: c.name, archived: !!c.archived, members: (cmembers.data || []).filter((m) => m.channel_id === c.id).map((m) => m.user_id) })),
         messages: (messages.data || []).map((m) => ({ id: m.id, channelId: m.channel_id, userId: m.user_id, text: m.body, ts: new Date(m.created_at).getTime() })),
         settings: (settings.data && settings.data[0])
             ? { visible: true, lat: settings.data[0].store_lat, lng: settings.data[0].store_lng, radius: Number(settings.data[0].radius_miles) || 1, address: settings.data[0].store_address || "" }
@@ -154,6 +154,16 @@ function makeActions(meId) {
         setAvailability: (userId, dow, { on, s, e }) => supabase.from("availability").upsert({ user_id: userId, dow, available: on, start_time: s, end_time: e }, { onConflict: "user_id,dow" }),
         // chat
         sendMessage: (channelId, body) => supabase.from("messages").insert({ channel_id: channelId, user_id: meId, body }),
+        createChannel: async (name, memberIds) => {
+            const { data, error } = await supabase.from("channels").insert({ name }).select().single();
+            if (error)
+                throw error;
+            const ids = Array.from(new Set([...memberIds, meId]));
+            return supabase.from("channel_members").upsert(ids.map((uid) => ({ channel_id: data.id, user_id: uid })));
+        },
+        setChannelArchived: (id, archived) => supabase.from("channels").update({ archived }).eq("id", id),
+        addChannelMembers: (channelId, userIds) => supabase.from("channel_members").upsert(userIds.map((uid) => ({ channel_id: channelId, user_id: uid }))),
+        removeChannelMember: (channelId, userId) => supabase.from("channel_members").delete().eq("channel_id", channelId).eq("user_id", userId),
         // pay
         setTip: (shiftId, tips) => supabase.from("pay").upsert({ shift_id: shiftId, tips }, { onConflict: "shift_id" }),
         setWeekPaid: (shiftIds, paid) => supabase.from("pay").upsert(shiftIds.map((id) => ({ shift_id: id, paid })), { onConflict: "shift_id" }),
@@ -174,9 +184,9 @@ function makeActions(meId) {
         addRole: (name) => supabase.from("roles").insert({ name }),
         removeRole: (name) => supabase.from("roles").delete().eq("name", name),
         // team
-        updateMember: async (id, { name, position, access, jobRoles, rate, method }) => {
+        updateMember: async (id, { name, position, access, jobRoles, rate }) => {
             await supabase.from("profiles").update({ name, position, access, title: cap(position), job_roles: jobRoles }).eq("id", id);
-            return supabase.from("private_pay").upsert({ user_id: id, rate, method }, { onConflict: "user_id" });
+            return supabase.from("private_pay").upsert({ user_id: id, rate }, { onConflict: "user_id" });
         },
         removeMember: (id) => supabase.from("profiles").delete().eq("id", id),
         // my profile
@@ -203,7 +213,7 @@ const C = {
 };
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const DOW_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const PAYMENT_METHODS = ["Direct deposit", "Venmo", "Cash", "Zelle", "Check"];
+const PAYMENT_METHODS = ["Venmo", "Apple Pay", "Zelle", "Cash App", "Direct deposit", "Check", "Cash", "Other"];
 const POSITIONS = ["owner", "manager", "employee"];
 const pad = (n) => String(n).padStart(2, "0");
 const toKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -314,6 +324,8 @@ function App() {
     }, [session, refresh]);
     const meId = session?.user?.id || null;
     const rawActions = useMemo(() => makeActions(meId), [meId]);
+    const unreadCount = ((db && db.notifications) || []).filter((n) => !n.read).length;
+    useEffect(() => { document.title = unreadCount ? `(${unreadCount}) CALISTO'S` : "CALISTO'S \u2014 Staff"; }, [unreadCount]);
     const actions = useMemo(() => {
         const o = {};
         for (const k of Object.keys(rawActions))
@@ -697,85 +709,162 @@ function ScheduleView({ db, me, isEmployer, actions }) {
     const myIncoming = (db.trades || []).filter((t) => t.toUserId === me.id && t.status === "pending");
     const myOutgoing = (db.trades || []).filter((t) => t.fromUserId === me.id && ["pending", "accepted"].includes(t.status));
     const approvals = isEmployer ? (db.trades || []).filter((t) => t.status === "accepted") : [];
+    const [view, setView] = useState("week");
+    function jumpToDate(key) {
+        const target = mondayOf(new Date(key + "T00:00"));
+        const base = mondayOf(new Date());
+        const diff = Math.round((target - base) / (7 * 86400000));
+        setOffset(diff);
+        setSelIdx((new Date(key + "T00:00").getDay() + 6) % 7);
+        setView("week");
+    }
+    function copyLastWeek() {
+        const prev = weekDates(offset - 1).map(toKey);
+        const prevShifts = db.shifts.filter((s) => prev.includes(s.date));
+        if (!prevShifts.length) {
+            alert("Last week has no shifts to copy.");
+            return;
+        }
+        if (!window.confirm(`Copy ${prevShifts.length} shift${prevShifts.length > 1 ? "s" : ""} from last week into this week?`))
+            return;
+        prevShifts.forEach((s) => {
+            const d = new Date(s.date + "T00:00");
+            d.setDate(d.getDate() + 7);
+            actions.addShift({ date: toKey(d), start: s.start, end: s.end, userId: s.userId, role: s.role, notes: s.notes });
+        });
+    }
     return (React.createElement("div", null,
         React.createElement(SectionTitle, { title: "Schedule", sub: isEmployer ? "Build the week, then release it." : "Your shifts and the full floor.", action: isEmployer && React.createElement(Btn, { small: true, onClick: () => setEditing({ date: selDate }) },
                 React.createElement(Plus, { size: 15 }),
                 " Add shift") }),
-        React.createElement(ClockCard, { db: db, me: me, actions: actions }),
-        isEmployer ? (React.createElement("div", { className: "cw-card", style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12, padding: "10px 13px" } },
-            React.createElement(BadgeCheck, { size: 18, color: published ? C.green : C.muted }),
-            React.createElement("div", { style: { flex: 1 } },
-                React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: C.ink } },
-                    published ? "Released" : "Draft",
-                    " \u00B7 ",
-                    weekLabel(week)),
-                React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, published ? `Notified ${new Date(published).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : "Staff aren't notified until you release.")),
-            React.createElement(Btn, { small: true, variant: published ? "ghost" : "primary", disabled: !weekHasShifts, onClick: () => actions.releaseWeek(weekKey) }, published ? "Notify again" : "Release"))) : React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginBottom: 12, fontSize: 12, color: published ? C.green : C.muted } },
-            React.createElement(BadgeCheck, { size: 14 }),
-            " ",
-            published ? `Schedule released for ${weekLabel(week)}` : `Schedule for ${weekLabel(week)} isn't final yet`),
-        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
-            React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o - 1) },
-                React.createElement(ChevronLeft, { size: 18 })),
-            React.createElement("div", { style: { textAlign: "center" } },
-                React.createElement("div", { style: { fontWeight: 700, color: C.ink, fontSize: 14 } }, weekLabel(week)),
-                React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, offset === 0 ? "This week" : offset === 1 ? "Next week" : offset === -1 ? "Last week" : `${offset > 0 ? "+" : ""}${offset} weeks`)),
-            React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o + 1) },
-                React.createElement(ChevronRight, { size: 18 }))),
-        React.createElement("div", { className: "cw-weekstrip" }, week.map((d, i) => {
-            const key = toKey(d);
-            const has = dayShifts(key).length;
-            const mineCount = mine(key).length;
-            const today = todayKey() === key;
-            const active = i === selIdx;
-            return React.createElement("button", { key: key, onClick: () => setSelIdx(i), className: "cw-daycell", style: { background: active ? C.maroon : C.card, borderColor: active ? C.maroon : C.line } },
-                React.createElement("span", { style: { fontSize: 10.5, color: active ? C.silver : C.muted } }, DOW[i]),
-                React.createElement("span", { style: { fontSize: 17, fontWeight: 700, color: active ? C.boneSoft : (today ? C.maroon : C.ink) } }, d.getDate()),
-                React.createElement("span", { style: { display: "flex", gap: 3, height: 6 } }, has > 0 && React.createElement("i", { style: { width: 5, height: 5, borderRadius: 9, background: mineCount ? (active ? C.silverLt : C.maroon) : C.silver } })));
-        })),
-        React.createElement("div", { style: { marginTop: 6 } },
-            React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".05em", margin: "16px 0 10px" } },
-                DOW_FULL[selIdx],
-                ", ",
-                fmtDay(week[selIdx])),
-            visible.length === 0 ? React.createElement(Empty, { icon: React.createElement(CalendarDays, { size: 30 }), text: isEmployer ? "No shifts yet." : "Nothing scheduled this day." }) : (React.createElement("div", { style: { display: "grid", gap: 9 } }, visible.map((s) => {
-                const u = userById(s.userId);
-                const isMine = s.userId === me.id;
-                const future = s.date >= todayKey();
-                const pendingTrade = (db.trades || []).some((t) => t.shiftId === s.id && ["pending", "accepted"].includes(t.status));
-                return React.createElement("div", { key: s.id, className: "cw-card", style: { borderLeft: `4px solid ${u?.color || C.line}` } },
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11 } },
-                        React.createElement(Avatar, { user: u, size: 36 }),
-                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" } },
-                                React.createElement("span", { style: { fontWeight: 700, color: C.ink, fontSize: 14.5 } }, u?.name || "Unassigned"),
-                                isMine && React.createElement("span", { className: "cw-pill", style: { background: C.maroonSoft, color: C.maroon } }, "You"),
-                                React.createElement("span", { className: "cw-pill", style: { background: C.silverLt, color: C.steel } }, s.role),
-                                pendingTrade && React.createElement("span", { className: "cw-pill", style: { background: C.amberSoft, color: C.amber } },
-                                    React.createElement(ArrowLeftRight, { size: 11 }),
-                                    " Trade pending"),
-                                offOn(db, s.userId, s.date) && React.createElement("span", { className: "cw-pill", style: { background: C.silverLt, color: C.steel } },
-                                    React.createElement(CalendarOff, { size: 11 }),
-                                    " On approved leave")),
-                            React.createElement("div", { style: { fontSize: 13, color: C.muted, marginTop: 3 } },
-                                fmtTime(s.start),
-                                " \u2013 ",
-                                fmtTime(s.end),
-                                " \u00B7 ",
-                                hoursBetween(s.start, s.end),
-                                "h",
-                                s.notes ? ` · ${s.notes}` : "")),
-                        isEmployer && React.createElement("button", { className: "cw-iconbtn", onClick: () => setEditing(s) },
-                            React.createElement(Pencil, { size: 15 }))),
-                    isMine && future && !pendingTrade && React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.boneSoft}` } },
-                        React.createElement(Btn, { small: true, variant: "steel", onClick: () => setTradeFor(s) },
-                            React.createElement(ArrowLeftRight, { size: 14 }),
-                            " Offer to trade")));
-            })))),
+        React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12 } },
+            React.createElement("button", { className: "cw-chip", onClick: () => setView("week"), style: { background: view === "week" ? C.maroon : C.card, color: view === "week" ? C.boneSoft : C.ink, borderColor: view === "week" ? C.maroon : C.line } },
+                React.createElement(CalendarDays, { size: 13 }),
+                " Week"),
+            React.createElement("button", { className: "cw-chip", onClick: () => setView("month"), style: { background: view === "month" ? C.maroon : C.card, color: view === "month" ? C.boneSoft : C.ink, borderColor: view === "month" ? C.maroon : C.line } },
+                React.createElement(CalendarDays, { size: 13 }),
+                " Month"),
+            isEmployer && view === "week" && !weekHasShifts && React.createElement("button", { className: "cw-chip", onClick: copyLastWeek, style: { background: C.card, borderColor: C.line, color: C.ink, marginLeft: "auto" } },
+                React.createElement(Plus, { size: 13 }),
+                " Copy last week")),
+        view === "month" && React.createElement(MonthView, { db: db, me: me, isEmployer: isEmployer, onPick: jumpToDate }),
+        view === "week" && React.createElement(React.Fragment, null,
+            React.createElement(ClockCard, { db: db, me: me, actions: actions }),
+            isEmployer ? (React.createElement("div", { className: "cw-card", style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12, padding: "10px 13px" } },
+                React.createElement(BadgeCheck, { size: 18, color: published ? C.green : C.muted }),
+                React.createElement("div", { style: { flex: 1 } },
+                    React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: C.ink } },
+                        published ? "Released" : "Draft",
+                        " \u00B7 ",
+                        weekLabel(week)),
+                    React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, published ? `Notified ${new Date(published).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : "Staff aren't notified until you release.")),
+                React.createElement(Btn, { small: true, variant: published ? "ghost" : "primary", disabled: !weekHasShifts, onClick: () => actions.releaseWeek(weekKey) }, published ? "Notify again" : "Release"))) : React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginBottom: 12, fontSize: 12, color: published ? C.green : C.muted } },
+                React.createElement(BadgeCheck, { size: 14 }),
+                " ",
+                published ? `Schedule released for ${weekLabel(week)}` : `Schedule for ${weekLabel(week)} isn't final yet`),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+                React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o - 1) },
+                    React.createElement(ChevronLeft, { size: 18 })),
+                React.createElement("div", { style: { textAlign: "center" } },
+                    React.createElement("div", { style: { fontWeight: 700, color: C.ink, fontSize: 14 } }, weekLabel(week)),
+                    React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, offset === 0 ? "This week" : offset === 1 ? "Next week" : offset === -1 ? "Last week" : `${offset > 0 ? "+" : ""}${offset} weeks`)),
+                React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o + 1) },
+                    React.createElement(ChevronRight, { size: 18 }))),
+            React.createElement("div", { className: "cw-weekstrip" }, week.map((d, i) => {
+                const key = toKey(d);
+                const has = dayShifts(key).length;
+                const mineCount = mine(key).length;
+                const today = todayKey() === key;
+                const active = i === selIdx;
+                return React.createElement("button", { key: key, onClick: () => setSelIdx(i), className: "cw-daycell", style: { background: active ? C.maroon : C.card, borderColor: active ? C.maroon : C.line } },
+                    React.createElement("span", { style: { fontSize: 10.5, color: active ? C.silver : C.muted } }, DOW[i]),
+                    React.createElement("span", { style: { fontSize: 17, fontWeight: 700, color: active ? C.boneSoft : (today ? C.maroon : C.ink) } }, d.getDate()),
+                    React.createElement("span", { style: { display: "flex", gap: 3, height: 6 } }, has > 0 && React.createElement("i", { style: { width: 5, height: 5, borderRadius: 9, background: mineCount ? (active ? C.silverLt : C.maroon) : C.silver } })));
+            })),
+            React.createElement("div", { style: { marginTop: 6 } },
+                React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".05em", margin: "16px 0 10px" } },
+                    DOW_FULL[selIdx],
+                    ", ",
+                    fmtDay(week[selIdx])),
+                visible.length === 0 ? React.createElement(Empty, { icon: React.createElement(CalendarDays, { size: 30 }), text: isEmployer ? "No shifts yet." : "Nothing scheduled this day." }) : (React.createElement("div", { style: { display: "grid", gap: 9 } }, visible.map((s) => {
+                    const u = userById(s.userId);
+                    const isMine = s.userId === me.id;
+                    const future = s.date >= todayKey();
+                    const pendingTrade = (db.trades || []).some((t) => t.shiftId === s.id && ["pending", "accepted"].includes(t.status));
+                    return React.createElement("div", { key: s.id, className: "cw-card", style: { borderLeft: `4px solid ${u?.color || C.line}` } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11 } },
+                            React.createElement(Avatar, { user: u, size: 36 }),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" } },
+                                    React.createElement("span", { style: { fontWeight: 700, color: C.ink, fontSize: 14.5 } }, u?.name || "Unassigned"),
+                                    isMine && React.createElement("span", { className: "cw-pill", style: { background: C.maroonSoft, color: C.maroon } }, "You"),
+                                    React.createElement("span", { className: "cw-pill", style: { background: C.silverLt, color: C.steel } }, s.role),
+                                    pendingTrade && React.createElement("span", { className: "cw-pill", style: { background: C.amberSoft, color: C.amber } },
+                                        React.createElement(ArrowLeftRight, { size: 11 }),
+                                        " Trade pending"),
+                                    offOn(db, s.userId, s.date) && React.createElement("span", { className: "cw-pill", style: { background: C.silverLt, color: C.steel } },
+                                        React.createElement(CalendarOff, { size: 11 }),
+                                        " On approved leave")),
+                                React.createElement("div", { style: { fontSize: 13, color: C.muted, marginTop: 3 } },
+                                    fmtTime(s.start),
+                                    " \u2013 ",
+                                    fmtTime(s.end),
+                                    " \u00B7 ",
+                                    hoursBetween(s.start, s.end),
+                                    "h",
+                                    s.notes ? ` · ${s.notes}` : "")),
+                            isEmployer && React.createElement("button", { className: "cw-iconbtn", onClick: () => setEditing(s) },
+                                React.createElement(Pencil, { size: 15 }))),
+                        isMine && future && !pendingTrade && React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.boneSoft}` } },
+                            React.createElement(Btn, { small: true, variant: "steel", onClick: () => setTradeFor(s) },
+                                React.createElement(ArrowLeftRight, { size: 14 }),
+                                " Offer to trade")));
+                }))))),
         approvals.length > 0 && React.createElement(TradeApprovals, { db: db, approvals: approvals, actions: actions }),
         (myIncoming.length > 0 || myOutgoing.length > 0) && React.createElement(MyTrades, { db: db, incoming: myIncoming, outgoing: myOutgoing, actions: actions }),
         editing && React.createElement(ShiftModal, { db: db, shift: editing, onClose: () => setEditing(null), actions: actions }),
         tradeFor && React.createElement(OfferTradeModal, { db: db, me: me, shift: tradeFor, onClose: () => setTradeFor(null), actions: actions })));
+}
+function MonthView({ db, me, isEmployer, onPick }) {
+    const [mOff, setMOff] = useState(0);
+    const now = new Date();
+    const first = new Date(now.getFullYear(), now.getMonth() + mOff, 1);
+    const label = first.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    const gridStart = mondayOf(first);
+    const days = Array.from({ length: 42 }, (_, i) => { const d = new Date(gridStart); d.setDate(gridStart.getDate() + i); return d; });
+    const userById = (id) => db.users.find((u) => u.id === id);
+    const offNames = (key) => (db.timeOff || []).filter((t) => t.status === "approved" && key >= t.start && key <= t.end).map((t) => userById(t.userId)?.name).filter(Boolean);
+    return (React.createElement("div", null,
+        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } },
+            React.createElement("button", { className: "cw-nav", onClick: () => setMOff((o) => o - 1) },
+                React.createElement(ChevronLeft, { size: 18 })),
+            React.createElement("div", { style: { fontWeight: 700, color: C.ink, fontSize: 14 } }, label),
+            React.createElement("button", { className: "cw-nav", onClick: () => setMOff((o) => o + 1) },
+                React.createElement(ChevronRight, { size: 18 }))),
+        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3, marginBottom: 4 } }, DOW.map((d) => React.createElement("div", { key: d, style: { textAlign: "center", fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase" } }, d[0]))),
+        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 } }, days.map((d) => {
+            const key = toKey(d);
+            const inMonth = d.getMonth() === first.getMonth();
+            const shifts = db.shifts.filter((s) => s.date === key);
+            const people = Array.from(new Set(shifts.map((s) => s.userId))).map(userById).filter(Boolean);
+            const meWorking = shifts.some((s) => s.userId === me.id);
+            const off = offNames(key);
+            const today = key === todayKey();
+            return (React.createElement("button", { key: key, onClick: () => onPick(key), style: { minHeight: 56, padding: "4px 3px", borderRadius: 8, border: `1px solid ${today ? C.maroon : C.line}`, background: inMonth ? C.card : C.boneSoft, opacity: inMonth ? 1 : 0.45, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } },
+                React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: meWorking ? C.maroon : C.ink } }, d.getDate()),
+                React.createElement("span", { style: { display: "flex", gap: 2, flexWrap: "wrap", justifyContent: "center" } },
+                    people.slice(0, 3).map((u) => React.createElement("i", { key: u.id, title: u.name, style: { width: 7, height: 7, borderRadius: 9, background: u.color || C.maroon, outline: u.id === me.id ? `1.5px solid ${C.ink}` : "none" } })),
+                    people.length > 3 && React.createElement("span", { style: { fontSize: 9, color: C.muted } },
+                        "+",
+                        people.length - 3)),
+                off.length > 0 && React.createElement("span", { title: `Off: ${off.join(", ")}`, style: { fontSize: 8.5, color: C.amber, fontWeight: 700 } },
+                    "OFF",
+                    off.length > 1 ? ` ×${off.length}` : "")));
+        })),
+        React.createElement("div", { style: { fontSize: 11.5, color: C.muted, marginTop: 8 } },
+            "Dots = who's working (your dot is outlined). OFF = approved time off",
+            isEmployer ? " — future requests show here as soon as you approve them" : "",
+            ". Tap a day to open it.")));
 }
 function OfferTradeModal({ db, me, shift, onClose, actions }) {
     const candidates = db.users.filter((u) => u.position !== "owner" && u.id !== me.id);
@@ -898,16 +987,42 @@ function ShiftModal({ db, shift, onClose, actions }) {
     const dow = DOW[(new Date(date + "T00:00").getDay() + 6) % 7];
     const av = db.availability?.[userId]?.[dow];
     const onLeave = offOn(db, userId, date);
-    function save() { const payload = { date, start, end, userId, role, notes }; if (isNew)
-        actions.addShift(payload);
-    else
-        actions.updateShift(shift.id, payload); onClose(); }
+    function statusOf(uid) {
+        if (offOn(db, uid, date))
+            return { s: "off", label: "time off" };
+        const a = db.availability?.[uid]?.[dow];
+        if (!a)
+            return { s: "unknown", label: "" };
+        return a.on ? { s: "ok", label: `${fmtTime(a.s)}–${fmtTime(a.e)}` } : { s: "no", label: "unavailable" };
+    }
+    function save() {
+        const st = statusOf(userId);
+        if (st.s === "off" || st.s === "no") {
+            const who = db.users.find((u) => u.id === userId)?.name || "This person";
+            const why = st.s === "off" ? "has approved time off on this date" : `is marked unavailable on ${dow}s`;
+            if (!window.confirm(`${who} ${why}. Schedule them anyway?`))
+                return;
+        }
+        const payload = { date, start, end, userId, role, notes };
+        if (isNew)
+            actions.addShift(payload);
+        else
+            actions.updateShift(shift.id, payload);
+        onClose();
+    }
+    const chipColor = (st, sel) => st.s === "ok" ? (sel ? C.green : C.greenSoft) : (st.s === "off" || st.s === "no") ? (sel ? C.danger : "#F3DDDB") : (sel ? C.maroon : C.card);
+    const chipText = (st, sel) => sel ? "#fff" : st.s === "ok" ? C.green : (st.s === "off" || st.s === "no") ? C.danger : C.ink;
     return (React.createElement(Modal, { title: isNew ? "Add shift" : "Edit shift", onClose: onClose },
-        React.createElement(Field, { label: "Staff member" },
-            React.createElement("select", { style: inputStyle, value: userId, onChange: (e) => setUserId(e.target.value) }, staff.map((e) => React.createElement("option", { key: e.id, value: e.id },
-                e.name,
-                " \u2014 ",
-                cap(e.position))))),
+        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 7 } },
+            "Staff member ",
+            React.createElement("span", { style: { fontWeight: 400, textTransform: "none" } }, "\u00B7 green = available, red = conflict")),
+        React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 13 } }, staff.map((u) => {
+            const st = statusOf(u.id);
+            const sel = u.id === userId;
+            return React.createElement("button", { key: u.id, className: "cw-chip", onClick: () => setUserId(u.id), style: { background: chipColor(st, sel), color: chipText(st, sel), borderColor: sel ? chipColor(st, sel) : C.line } },
+                u.name,
+                st.label ? ` · ${st.label}` : "");
+        })),
         av && React.createElement("div", { style: { marginTop: -6, marginBottom: 12, fontSize: 12, color: av.on ? C.green : C.danger, display: "flex", gap: 6, alignItems: "center" } },
             React.createElement(Info, { size: 13 }),
             av.on ? `Available ${fmtTime(av.s)}–${fmtTime(av.e)} on ${dow}` : `Marked unavailable on ${dow}`),
@@ -995,11 +1110,14 @@ function AvailabilityGrid({ db }) {
 }
 /* ---------------- CHAT ---------------- */
 function ChatView({ db, me, actions }) {
-    const myChannels = db.channels.filter((c) => c.members.includes(me.id));
+    const isEmployer = me.access === "employer";
+    const liveChannels = db.channels.filter((c) => !c.archived);
+    const myChannels = liveChannels.filter((c) => c.members.includes(me.id));
     const [activeId, setActiveId] = useState(myChannels[0]?.id);
     const [draft, setDraft] = useState("");
+    const [manage, setManage] = useState(false);
     const scrollRef = useRef(null);
-    const active = db.channels.find((c) => c.id === activeId) || myChannels[0];
+    const active = myChannels.find((c) => c.id === activeId) || myChannels[0];
     const msgs = db.messages.filter((m) => m.channelId === active?.id);
     useEffect(() => { if (scrollRef.current)
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [msgs.length, activeId]);
@@ -1007,12 +1125,15 @@ function ChatView({ db, me, actions }) {
         return; actions.sendMessage(active.id, text); setDraft(""); }
     const userById = (id) => db.users.find((u) => u.id === id);
     return (React.createElement("div", null,
-        React.createElement(SectionTitle, { title: "Chat", sub: "Group channels for the team." }),
+        React.createElement(SectionTitle, { title: "Chat", sub: "Group channels for the team.", action: isEmployer && React.createElement(Btn, { small: true, variant: "steel", onClick: () => setManage(true) },
+                React.createElement(Pencil, { size: 14 }),
+                " Manage") }),
         React.createElement("div", { className: "cw-chips" }, myChannels.map((c) => React.createElement("button", { key: c.id, onClick: () => setActiveId(c.id), className: "cw-chip", style: { background: c.id === active?.id ? C.maroon : C.card, color: c.id === active?.id ? C.boneSoft : C.ink, borderColor: c.id === active?.id ? C.maroon : C.line } },
             React.createElement(Hash, { size: 13 }),
             " ",
             c.name))),
-        React.createElement("div", { className: "cw-chatbox" },
+        myChannels.length === 0 && React.createElement(Empty, { icon: React.createElement(MessageSquare, { size: 28 }), text: "You're not in any chats yet." }),
+        active && React.createElement("div", { className: "cw-chatbox" },
             React.createElement("div", { ref: scrollRef, className: "cw-msgs" },
                 msgs.length === 0 && React.createElement(Empty, { icon: React.createElement(MessageSquare, { size: 28 }), text: "No messages yet." }),
                 msgs.map((m, i) => {
@@ -1032,7 +1153,116 @@ function ChatView({ db, me, actions }) {
             React.createElement("div", { className: "cw-composer" },
                 React.createElement("input", { value: draft, onChange: (e) => setDraft(e.target.value), onKeyDown: (e) => e.key === "Enter" && send(), placeholder: `Message ${active?.name || ""}`, style: { ...inputStyle, border: "none", background: "transparent", flex: 1 } }),
                 React.createElement(Btn, { small: true, onClick: send, disabled: !draft.trim() },
-                    React.createElement(Send, { size: 15 }))))));
+                    React.createElement(Send, { size: 15 })))),
+        manage && React.createElement(ChannelManager, { db: db, me: me, onClose: () => setManage(false), actions: actions })));
+}
+function ChannelManager({ db, me, onClose, actions }) {
+    const [mode, setMode] = useState("list"); // list | new
+    const [name, setName] = useState("");
+    const [picked, setPicked] = useState([me.id]);
+    const [err, setErr] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [expanded, setExpanded] = useState(null);
+    const live = db.channels.filter((c) => !c.archived);
+    const archived = db.channels.filter((c) => c.archived);
+    const userById = (id) => db.users.find((u) => u.id === id);
+    const managers = db.users.filter((u) => u.position !== "employee").map((u) => u.id);
+    const expos = db.users.filter((u) => (u.jobRoles || []).includes("Expo")).map((u) => u.id);
+    const everyone = db.users.map((u) => u.id);
+    function togglePick(id) { if (id === me.id)
+        return; setPicked((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]); }
+    function quick(ids) { setPicked((p) => Array.from(new Set([...p, ...ids]))); }
+    async function create() {
+        const n = name.trim();
+        if (!n) {
+            setErr("Give the chat a name.");
+            return;
+        }
+        if (db.channels.some((c) => c.name.toLowerCase() === n.toLowerCase())) {
+            setErr("A chat with that name already exists.");
+            return;
+        }
+        setBusy(true);
+        try {
+            await actions.createChannel(n, picked);
+            setMode("list");
+            setName("");
+            setPicked([me.id]);
+            setErr("");
+        }
+        catch (e) {
+            setErr(e.message || "Couldn't create the chat.");
+        }
+        setBusy(false);
+    }
+    return (React.createElement(Modal, { title: mode === "new" ? "New chat" : "Manage chats", onClose: onClose, wide: true },
+        mode === "list" && (React.createElement(React.Fragment, null,
+            React.createElement(Btn, { small: true, onClick: () => setMode("new"), style: { marginBottom: 14 } },
+                React.createElement(Plus, { size: 14 }),
+                " New chat"),
+            live.map((c) => (React.createElement("div", { key: c.id, className: "cw-card", style: { marginBottom: 9 } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+                    React.createElement(Hash, { size: 14, color: C.muted }),
+                    React.createElement("div", { style: { flex: 1, fontWeight: 700, fontSize: 13.5, color: C.ink } },
+                        c.name,
+                        " ",
+                        React.createElement("span", { style: { fontWeight: 400, color: C.muted, fontSize: 12 } },
+                            "\u00B7 ",
+                            c.members.length)),
+                    React.createElement(Btn, { small: true, variant: "ghost", onClick: () => setExpanded(expanded === c.id ? null : c.id) }, expanded === c.id ? "Close" : "Members"),
+                    React.createElement(Btn, { small: true, variant: "steel", onClick: () => actions.setChannelArchived(c.id, true) }, "Archive")),
+                expanded === c.id && (React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.boneSoft}` } },
+                    c.members.map((uid) => {
+                        const u = userById(uid);
+                        if (!u)
+                            return null;
+                        return React.createElement("div", { key: uid, style: { display: "flex", alignItems: "center", gap: 9, padding: "5px 0" } },
+                            React.createElement(Avatar, { user: u, size: 26 }),
+                            React.createElement("div", { style: { flex: 1, fontSize: 13, color: C.ink } }, u.name),
+                            uid !== me.id && React.createElement(Btn, { small: true, variant: "ghost", onClick: () => actions.removeChannelMember(c.id, uid) },
+                                React.createElement(X, { size: 13 })));
+                    }),
+                    db.users.filter((u) => !c.members.includes(u.id)).length > 0 && (React.createElement("div", { style: { marginTop: 8 } },
+                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 } }, "Add someone"),
+                        React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } }, db.users.filter((u) => !c.members.includes(u.id)).map((u) => React.createElement("button", { key: u.id, className: "cw-chip", style: { background: C.card, borderColor: C.line, color: C.ink }, onClick: () => actions.addChannelMembers(c.id, [u.id]) },
+                            React.createElement(Plus, { size: 12 }),
+                            " ",
+                            u.name)))))))))),
+            archived.length > 0 && (React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".05em", margin: "14px 0 8px" } }, "Archived"),
+                archived.map((c) => React.createElement("div", { key: c.id, className: "cw-card", style: { marginBottom: 8, display: "flex", alignItems: "center", gap: 8, opacity: 0.75 } },
+                    React.createElement(Hash, { size: 14, color: C.muted }),
+                    React.createElement("div", { style: { flex: 1, fontSize: 13.5, color: C.muted } }, c.name),
+                    React.createElement(Btn, { small: true, variant: "ghost", onClick: () => actions.setChannelArchived(c.id, false) }, "Restore"))))))),
+        mode === "new" && (React.createElement(React.Fragment, null,
+            React.createElement(Field, { label: "Chat name" },
+                React.createElement("input", { style: inputStyle, value: name, onChange: (e) => { setName(e.target.value); setErr(""); }, placeholder: "e.g. Weekend crew" })),
+            React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 } },
+                React.createElement("button", { className: "cw-chip", style: { background: C.card, borderColor: C.line, color: C.ink }, onClick: () => quick(everyone) },
+                    React.createElement(Users, { size: 12 }),
+                    " Whole team"),
+                React.createElement("button", { className: "cw-chip", style: { background: C.card, borderColor: C.line, color: C.ink }, onClick: () => quick(expos) },
+                    React.createElement(Plus, { size: 12 }),
+                    " All Expos"),
+                React.createElement("button", { className: "cw-chip", style: { background: C.card, borderColor: C.line, color: C.ink }, onClick: () => quick(managers) },
+                    React.createElement(ShieldCheck, { size: 12 }),
+                    " All managers")),
+            React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 7 } },
+                "Members (",
+                picked.length,
+                ")"),
+            React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 } }, db.users.map((u) => {
+                const on = picked.includes(u.id);
+                return React.createElement("button", { key: u.id, className: "cw-chip", onClick: () => togglePick(u.id), style: { background: on ? C.maroon : C.card, color: on ? C.boneSoft : C.ink, borderColor: on ? C.maroon : C.line, opacity: u.id === me.id ? 0.7 : 1 } },
+                    on ? React.createElement(Check, { size: 12 }) : React.createElement(Plus, { size: 12 }),
+                    " ",
+                    u.name,
+                    u.id === me.id ? " (you)" : "");
+            })),
+            err && React.createElement("div", { style: { color: C.danger, fontSize: 12.5, marginBottom: 10 } }, err),
+            React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "flex-end" } },
+                React.createElement(Btn, { variant: "ghost", onClick: () => { setMode("list"); setErr(""); } }, "Back"),
+                React.createElement(Btn, { onClick: create, disabled: busy }, busy ? "Creating…" : "Create chat"))))));
 }
 /* ---------------- PAY ---------------- */
 function PayView({ db, me, isEmployer, actions }) {
@@ -1041,6 +1271,7 @@ function PayView({ db, me, isEmployer, actions }) {
     return React.createElement(MyPayView, { db: db, me: me, actions: actions });
 }
 function PayrollView({ db, actions }) {
+    const [sub, setSub] = useState("week");
     const [offset, setOffset] = useState(0);
     const week = weekDates(offset);
     const weekKeys = week.map(toKey);
@@ -1060,104 +1291,112 @@ function PayrollView({ db, actions }) {
         React.createElement(SectionTitle, { title: "Payroll", sub: "Wages, tips, and a record of who's been paid.", action: React.createElement(Btn, { small: true, variant: "steel", onClick: () => setTipsModal(true) },
                 React.createElement(CircleDollarSign, { size: 15 }),
                 " Tips") }),
-        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
-            React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o - 1) },
-                React.createElement(ChevronLeft, { size: 18 })),
-            React.createElement("div", { style: { fontWeight: 700, color: C.ink, fontSize: 13.5 } },
-                "Pay week \u00B7 ",
-                weekLabel(week)),
-            React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o + 1) },
-                React.createElement(ChevronRight, { size: 18 }))),
-        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, padding: "11px 14px", borderRadius: 11, background: status.bg, border: `1px solid ${status.c}33`, marginBottom: 14 } },
-            React.createElement("span", { style: { width: 11, height: 11, borderRadius: 9, background: status.c, flexShrink: 0 } }),
-            React.createElement("span", { style: { fontWeight: 700, fontSize: 13.5, color: status.fg, flex: 1 } }, status.t),
-            React.createElement("span", { style: { fontSize: 12, color: status.fg } },
-                money(teamWages + teamTips),
-                " total")),
-        weekShifts.length > 0 && (React.createElement("div", { style: { marginBottom: 18 } },
-            React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: C.muted, marginBottom: 8 } }, "Paid calendar \u00B7 days worked"),
-            React.createElement("div", { style: { overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 12, background: C.card } },
-                React.createElement("table", { className: "cw-table" },
-                    React.createElement("thead", null,
-                        React.createElement("tr", null,
-                            React.createElement("th", { style: { textAlign: "left", position: "sticky", left: 0, background: C.card } }, "Staff"),
-                            week.map((d, i) => React.createElement("th", { key: i },
-                                DOW[i],
-                                React.createElement("br", null),
-                                React.createElement("span", { style: { fontWeight: 400, color: C.silver } }, d.getDate()))))),
-                    React.createElement("tbody", null, Object.entries(byUser).map(([userId, shifts]) => {
-                        const u = userById(userId);
-                        return React.createElement("tr", { key: userId },
-                            React.createElement("td", { style: { position: "sticky", left: 0, background: C.card } },
-                                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } },
-                                    React.createElement(Avatar, { user: u, size: 22 }),
-                                    React.createElement("span", { style: { fontWeight: 600, fontSize: 12.5 } }, u?.name))),
-                            week.map((d, i) => { const dk = toKey(d); const ds = shifts.filter((s) => s.date === dk); if (ds.length === 0)
-                                return React.createElement("td", { key: i }); const hrs = ds.reduce((a, s) => a + hoursBetween(s.start, s.end), 0); const paid = ds.every((s) => payFor(db, s.id).paid); return React.createElement("td", { key: i, style: { textAlign: "center", padding: 4 } },
-                                React.createElement("div", { style: { background: paid ? C.greenSoft : C.amberSoft, color: paid ? C.green : C.amber, borderRadius: 7, padding: "5px 2px", fontSize: 11, fontWeight: 700 } },
-                                    hrs,
-                                    "h",
-                                    paid && React.createElement(Check, { size: 11, style: { display: "block", margin: "1px auto 0" } }))); }));
-                    })))),
-            React.createElement("div", { style: { display: "flex", gap: 14, marginTop: 8, fontSize: 11.5, color: C.muted } },
-                React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } },
-                    React.createElement("span", { style: { width: 11, height: 11, borderRadius: 3, background: C.greenSoft, border: `1px solid ${C.green}55` } }),
-                    " Paid"),
-                React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } },
-                    React.createElement("span", { style: { width: 11, height: 11, borderRadius: 3, background: C.amberSoft, border: `1px solid ${C.amber}55` } }),
-                    " Worked, unpaid")))),
-        Object.keys(byUser).length === 0 ? React.createElement(Empty, { icon: React.createElement(Wallet, { size: 30 }), text: "No shifts in this pay week." }) : (React.createElement("div", { style: { display: "grid", gap: 14 } }, Object.entries(byUser).map(([userId, shifts]) => {
-            const u = userById(userId);
-            const base = shifts.reduce((a, s) => a + sBase(s), 0);
-            const tips = shifts.reduce((a, s) => a + (payFor(db, s.id).tips || 0), 0);
-            const total = base + tips;
-            const hrs = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0);
-            const userPaid = shifts.every((s) => payFor(db, s.id).paid);
-            return React.createElement("div", { key: userId, className: "cw-card", style: { padding: 0, overflow: "hidden" } },
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, padding: "13px 15px", background: userPaid ? C.greenSoft : C.boneSoft, borderBottom: `1px solid ${C.line}` } },
-                    React.createElement(Avatar, { user: u, size: 34 }),
-                    React.createElement("div", { style: { flex: 1 } },
-                        React.createElement("div", { style: { fontWeight: 700, color: C.ink, fontSize: 14.5 } }, u?.name),
-                        React.createElement("div", { style: { fontSize: 12, color: C.muted, display: "flex", alignItems: "center", gap: 5 } },
-                            u?.method === "Cash" ? React.createElement(Banknote, { size: 12 }) : React.createElement(CreditCard, { size: 12 }),
-                            u?.method,
-                            u?.handle ? ` · ${u.handle}` : "")),
-                    React.createElement("div", { style: { textAlign: "right" } },
-                        React.createElement("div", { style: { fontFamily: "Fraunces, serif", fontSize: 22, fontWeight: 600, color: C.ink } }, money(total)),
-                        React.createElement("div", { style: { fontSize: 11, color: C.muted } },
-                            hrs,
-                            "h \u00B7 ",
-                            money(base),
-                            " + ",
-                            money(tips),
-                            " tips"))),
-                React.createElement("div", { style: { padding: "4px 15px 12px" } },
-                    shifts.map((s) => {
-                        const p = payFor(db, s.id);
-                        return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.boneSoft}` } },
-                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                                React.createElement("div", { style: { fontSize: 13, color: C.ink, fontWeight: 600 } },
-                                    dlabel(s.date),
-                                    " \u00B7 ",
-                                    s.role),
-                                React.createElement("div", { style: { fontSize: 11.5, color: C.muted } },
-                                    hoursBetween(s.start, s.end),
-                                    "h \u00D7 ",
-                                    money(rateOf(db, s.userId)),
-                                    " = ",
-                                    money(sBase(s)),
-                                    p.tips ? ` + ${money(p.tips)} tips` : "")),
-                            React.createElement("input", { type: "number", min: "0", step: "1", defaultValue: p.tips || "", placeholder: "tips", onBlur: (e) => actions.setTip(s.id, parseFloat(e.target.value) || 0), style: { ...inputStyle, width: 64, padding: "5px 7px", fontSize: 12.5 } }),
-                            React.createElement("div", { style: { width: 64, textAlign: "right", fontWeight: 700, fontSize: 13, color: C.ink } }, money(sTotal(s))));
-                    }),
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, paddingTop: 12 } },
-                        React.createElement(Toggle, { on: userPaid, color: C.green, onClick: () => actions.setWeekPaid(shifts.map((s) => s.id), !userPaid) }),
+        React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 14 } },
+            React.createElement("button", { className: "cw-chip", onClick: () => setSub("week"), style: { background: sub === "week" ? C.maroon : C.card, color: sub === "week" ? C.boneSoft : C.ink, borderColor: sub === "week" ? C.maroon : C.line } },
+                React.createElement(Wallet, { size: 13 }),
+                " This week"),
+            React.createElement("button", { className: "cw-chip", onClick: () => setSub("records"), style: { background: sub === "records" ? C.maroon : C.card, color: sub === "records" ? C.boneSoft : C.ink, borderColor: sub === "records" ? C.maroon : C.line } },
+                React.createElement(CircleDollarSign, { size: 13 }),
+                " Records")),
+        sub === "records" ? React.createElement(RecordsView, { db: db }) : React.createElement(React.Fragment, null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+                React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o - 1) },
+                    React.createElement(ChevronLeft, { size: 18 })),
+                React.createElement("div", { style: { fontWeight: 700, color: C.ink, fontSize: 13.5 } },
+                    "Pay week \u00B7 ",
+                    weekLabel(week)),
+                React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o + 1) },
+                    React.createElement(ChevronRight, { size: 18 }))),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, padding: "11px 14px", borderRadius: 11, background: status.bg, border: `1px solid ${status.c}33`, marginBottom: 14 } },
+                React.createElement("span", { style: { width: 11, height: 11, borderRadius: 9, background: status.c, flexShrink: 0 } }),
+                React.createElement("span", { style: { fontWeight: 700, fontSize: 13.5, color: status.fg, flex: 1 } }, status.t),
+                React.createElement("span", { style: { fontSize: 12, color: status.fg } },
+                    money(teamWages + teamTips),
+                    " total")),
+            weekShifts.length > 0 && (React.createElement("div", { style: { marginBottom: 18 } },
+                React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: C.muted, marginBottom: 8 } }, "Paid calendar \u00B7 days worked"),
+                React.createElement("div", { style: { overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 12, background: C.card } },
+                    React.createElement("table", { className: "cw-table" },
+                        React.createElement("thead", null,
+                            React.createElement("tr", null,
+                                React.createElement("th", { style: { textAlign: "left", position: "sticky", left: 0, background: C.card } }, "Staff"),
+                                week.map((d, i) => React.createElement("th", { key: i },
+                                    DOW[i],
+                                    React.createElement("br", null),
+                                    React.createElement("span", { style: { fontWeight: 400, color: C.silver } }, d.getDate()))))),
+                        React.createElement("tbody", null, Object.entries(byUser).map(([userId, shifts]) => {
+                            const u = userById(userId);
+                            return React.createElement("tr", { key: userId },
+                                React.createElement("td", { style: { position: "sticky", left: 0, background: C.card } },
+                                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } },
+                                        React.createElement(Avatar, { user: u, size: 22 }),
+                                        React.createElement("span", { style: { fontWeight: 600, fontSize: 12.5 } }, u?.name))),
+                                week.map((d, i) => { const dk = toKey(d); const ds = shifts.filter((s) => s.date === dk); if (ds.length === 0)
+                                    return React.createElement("td", { key: i }); const hrs = ds.reduce((a, s) => a + hoursBetween(s.start, s.end), 0); const paid = ds.every((s) => payFor(db, s.id).paid); return React.createElement("td", { key: i, style: { textAlign: "center", padding: 4 } },
+                                    React.createElement("div", { style: { background: paid ? C.greenSoft : C.amberSoft, color: paid ? C.green : C.amber, borderRadius: 7, padding: "5px 2px", fontSize: 11, fontWeight: 700 } },
+                                        hrs,
+                                        "h",
+                                        paid && React.createElement(Check, { size: 11, style: { display: "block", margin: "1px auto 0" } }))); }));
+                        })))),
+                React.createElement("div", { style: { display: "flex", gap: 14, marginTop: 8, fontSize: 11.5, color: C.muted } },
+                    React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } },
+                        React.createElement("span", { style: { width: 11, height: 11, borderRadius: 3, background: C.greenSoft, border: `1px solid ${C.green}55` } }),
+                        " Paid"),
+                    React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } },
+                        React.createElement("span", { style: { width: 11, height: 11, borderRadius: 3, background: C.amberSoft, border: `1px solid ${C.amber}55` } }),
+                        " Worked, unpaid")))),
+            Object.keys(byUser).length === 0 ? React.createElement(Empty, { icon: React.createElement(Wallet, { size: 30 }), text: "No shifts in this pay week." }) : (React.createElement("div", { style: { display: "grid", gap: 14 } }, Object.entries(byUser).map(([userId, shifts]) => {
+                const u = userById(userId);
+                const base = shifts.reduce((a, s) => a + sBase(s), 0);
+                const tips = shifts.reduce((a, s) => a + (payFor(db, s.id).tips || 0), 0);
+                const total = base + tips;
+                const hrs = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0);
+                const userPaid = shifts.every((s) => payFor(db, s.id).paid);
+                return React.createElement("div", { key: userId, className: "cw-card", style: { padding: 0, overflow: "hidden" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, padding: "13px 15px", background: userPaid ? C.greenSoft : C.boneSoft, borderBottom: `1px solid ${C.line}` } },
+                        React.createElement(Avatar, { user: u, size: 34 }),
                         React.createElement("div", { style: { flex: 1 } },
-                            React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: userPaid ? C.green : C.ink } }, userPaid ? "Paid for the week" : "Mark paid"),
-                            React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, userPaid ? "They get a paid notification" : "Slide when their money has gone out")),
-                        React.createElement(AffirmCluster, { shifts: shifts, db: db }))));
-        }))),
-        tipsModal && React.createElement(TipsModal, { db: db, weekKeys: weekKeys, onClose: () => setTipsModal(false), actions: actions })));
+                            React.createElement("div", { style: { fontWeight: 700, color: C.ink, fontSize: 14.5 } }, u?.name),
+                            React.createElement("div", { style: { fontSize: 12, color: C.muted, display: "flex", alignItems: "center", gap: 5 } },
+                                u?.method === "Cash" ? React.createElement(Banknote, { size: 12 }) : React.createElement(CreditCard, { size: 12 }),
+                                u?.method,
+                                u?.handle ? ` · ${u.handle}` : "")),
+                        React.createElement("div", { style: { textAlign: "right" } },
+                            React.createElement("div", { style: { fontFamily: "Fraunces, serif", fontSize: 22, fontWeight: 600, color: C.ink } }, money(total)),
+                            React.createElement("div", { style: { fontSize: 11, color: C.muted } },
+                                hrs,
+                                "h \u00B7 ",
+                                money(base),
+                                " + ",
+                                money(tips),
+                                " tips"))),
+                    React.createElement("div", { style: { padding: "4px 15px 12px" } },
+                        shifts.map((s) => {
+                            const p = payFor(db, s.id);
+                            return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.boneSoft}` } },
+                                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                    React.createElement("div", { style: { fontSize: 13, color: C.ink, fontWeight: 600 } },
+                                        dlabel(s.date),
+                                        " \u00B7 ",
+                                        s.role),
+                                    React.createElement("div", { style: { fontSize: 11.5, color: C.muted } },
+                                        hoursBetween(s.start, s.end),
+                                        "h \u00D7 ",
+                                        money(rateOf(db, s.userId)),
+                                        " = ",
+                                        money(sBase(s)),
+                                        p.tips ? ` + ${money(p.tips)} tips` : "")),
+                                React.createElement("input", { type: "number", min: "0", step: "1", defaultValue: p.tips || "", placeholder: "tips", onBlur: (e) => actions.setTip(s.id, parseFloat(e.target.value) || 0), style: { ...inputStyle, width: 64, padding: "5px 7px", fontSize: 12.5 } }),
+                                React.createElement("div", { style: { width: 64, textAlign: "right", fontWeight: 700, fontSize: 13, color: C.ink } }, money(sTotal(s))));
+                        }),
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, paddingTop: 12 } },
+                            React.createElement(Toggle, { on: userPaid, color: C.green, onClick: () => actions.setWeekPaid(shifts.map((s) => s.id), !userPaid) }),
+                            React.createElement("div", { style: { flex: 1 } },
+                                React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: userPaid ? C.green : C.ink } }, userPaid ? "Paid for the week" : "Mark paid"),
+                                React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, userPaid ? "They get a paid notification" : "Slide when their money has gone out")),
+                            React.createElement(AffirmCluster, { shifts: shifts, db: db }))));
+            }))),
+            tipsModal && React.createElement(TipsModal, { db: db, weekKeys: weekKeys, onClose: () => setTipsModal(false), actions: actions }))));
 }
 function MyPayView({ db, me, actions }) {
     const [offset, setOffset] = useState(0);
@@ -1213,6 +1452,75 @@ function MyPayView({ db, me, actions }) {
             React.createElement("div", { style: { flex: 1 } },
                 React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: iAffirmed ? C.green : C.ink } }, iAffirmed ? "You confirmed you got paid" : "Confirm you got paid"),
                 React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, "Lets management know the money landed.")))));
+}
+function RecordsView({ db }) {
+    const N = 8;
+    const [detail, setDetail] = useState(null); // {userId, weekIdx}
+    const weeks = Array.from({ length: N }, (_, i) => weekDates(-i));
+    const people = db.users.slice().sort((a, b) => a.name.localeCompare(b.name));
+    const cellFor = (u, wk) => {
+        const keys = wk.map(toKey);
+        const shifts = db.shifts.filter((s) => s.userId === u.id && keys.includes(s.date));
+        if (!shifts.length)
+            return { state: "none", total: 0, shifts };
+        const total = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end) * u.rate + (payFor(db, s.id).tips || 0), 0);
+        const allPaid = shifts.every((s) => payFor(db, s.id).paid);
+        return { state: allPaid ? "paid" : "due", total, shifts };
+    };
+    const bg = { paid: C.greenSoft, due: "#F3DDDB", none: "transparent" };
+    const fg = { paid: C.green, due: C.danger, none: C.muted };
+    return (React.createElement("div", null,
+        React.createElement("div", { style: { fontSize: 12.5, color: C.muted, marginBottom: 12 } },
+            "Weekly totals per person (wages + tips). ",
+            React.createElement("b", { style: { color: C.green } }, "Green"),
+            " = fully paid \u00B7 ",
+            React.createElement("b", { style: { color: C.danger } }, "red"),
+            " = still owed \u00B7 blank = no shifts. Tap any amount for the shift-by-shift breakdown. Visible to employers only."),
+        React.createElement("div", { style: { overflowX: "auto", WebkitOverflowScrolling: "touch" } },
+            React.createElement("table", { style: { borderCollapse: "collapse", minWidth: 90 + people.length * 92 } },
+                React.createElement("thead", null,
+                    React.createElement("tr", null,
+                        React.createElement("th", { style: { position: "sticky", left: 0, background: C.bone, textAlign: "left", fontSize: 11, color: C.muted, padding: "6px 8px", zIndex: 1 } }, "Week"),
+                        people.map((u) => React.createElement("th", { key: u.id, style: { fontSize: 11.5, color: C.ink, padding: "6px 8px", whiteSpace: "nowrap" } },
+                            React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 5 } },
+                                React.createElement(Avatar, { user: u, size: 18 }),
+                                " ",
+                                u.name.split(" ")[0]))))),
+                React.createElement("tbody", null, weeks.map((wk, wi) => (React.createElement("tr", { key: wi },
+                    React.createElement("td", { style: { position: "sticky", left: 0, background: C.bone, fontSize: 11.5, fontWeight: 700, color: wi === 0 ? C.maroon : C.steel, padding: "7px 8px", whiteSpace: "nowrap", zIndex: 1 } },
+                        weekLabel(wk),
+                        wi === 0 ? " ·now" : ""),
+                    people.map((u) => {
+                        const c = cellFor(u, wk);
+                        return React.createElement("td", { key: u.id, style: { padding: 3 } },
+                            React.createElement("button", { disabled: c.state === "none", onClick: () => setDetail({ u, wk, c }), style: { width: "100%", borderRadius: 7, border: "none", padding: "7px 6px", background: bg[c.state], color: fg[c.state], fontWeight: 700, fontSize: 12 } }, c.state === "none" ? "—" : money(c.total)));
+                    }))))))),
+        detail && (React.createElement(Modal, { title: `${detail.u.name} · ${weekLabel(detail.wk)}`, onClose: () => setDetail(null) },
+            detail.c.shifts.sort((a, b) => a.date.localeCompare(b.date)).map((s, i) => {
+                const p = payFor(db, s.id);
+                const amt = hoursBetween(s.start, s.end) * detail.u.rate + (p.tips || 0);
+                return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.boneSoft}` } },
+                    React.createElement("div", { style: { flex: 1 } },
+                        React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: C.ink } },
+                            dlabel(s.date),
+                            " \u00B7 ",
+                            s.role),
+                        React.createElement("div", { style: { fontSize: 11.5, color: C.muted } },
+                            hoursBetween(s.start, s.end),
+                            "h \u00D7 ",
+                            money(detail.u.rate),
+                            p.tips ? ` + ${money(p.tips)} tips` : "")),
+                    React.createElement("div", { style: { textAlign: "right" } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: C.ink } }, money(amt)),
+                        React.createElement("span", { className: "cw-pill", style: { background: p.paid ? C.greenSoft : "#F3DDDB", color: p.paid ? C.green : C.danger } }, p.paid ? "Paid" : "Owed")));
+            }),
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "12px 0 2px", fontWeight: 700, color: C.ink } },
+                React.createElement("span", null, "Week total"),
+                React.createElement("span", null, money(detail.c.total))),
+            React.createElement("div", { style: { fontSize: 11.5, color: C.muted } },
+                "Paying: ",
+                detail.u.method,
+                detail.u.handle ? ` · ${detail.u.handle}` : "")))));
 }
 function AffirmCluster({ shifts, db }) {
     const ids = new Set();
@@ -1306,10 +1614,10 @@ function MyProfile({ db, me, actions }) {
                         " \u00B7 ",
                         money(me.rate),
                         "/hr"))),
-            React.createElement(Field, { label: "Preferred payment method" },
-                React.createElement("select", { style: inputStyle, value: method, onChange: (e) => setMethod(e.target.value) }, PAYMENT_METHODS.map((m) => React.createElement("option", { key: m }, m)))),
-            method !== "Cash" && method !== "Direct deposit" && React.createElement(Field, { label: `${method} handle` },
-                React.createElement("input", { style: inputStyle, value: handle, onChange: (e) => setHandle(e.target.value), placeholder: "@username or email" })),
+            React.createElement("p", { style: { fontSize: 11.5, color: C.muted, margin: "2px 0 12px" } }, "Payment method is set by each person in their own profile (Team tab)."),
+            method !== "Cash" && React.createElement(Field, { label: "Account name / number" },
+                React.createElement("input", { style: inputStyle, value: handle, onChange: (e) => setHandle(e.target.value), placeholder: method === "Apple Pay" ? "Phone number for Apple Pay" : method === "Venmo" ? "@your-venmo-name" : method === "Direct deposit" ? "Bank + account info" : "Name, @handle, or number" })),
+            React.createElement("p", { style: { fontSize: 11.5, color: C.muted, marginTop: -4, marginBottom: 12 } }, "Only you can change this. Management sees it so they can pay you."),
             React.createElement(Btn, { onClick: () => actions.updateMyProfile({ method, handle }), disabled: !dirty }, "Save changes")),
         React.createElement("div", { className: "cw-card" },
             React.createElement("div", { style: { fontWeight: 700, fontSize: 13.5, color: C.ink, marginBottom: 8 } }, "My roles"),
@@ -1355,7 +1663,6 @@ function OwnerTeam({ db, me, actions }) {
 function EditMemberModal({ db, me, member, onClose, actions }) {
     const [name, setName] = useState(member.name);
     const [rate, setRate] = useState(member.rate);
-    const [method, setMethod] = useState(member.method === "—" ? "Direct deposit" : member.method);
     const [position, setPosition] = useState(member.position);
     const [access, setAccess] = useState(member.access);
     const [jobRoles, setJobRoles] = useState(member.jobRoles);
@@ -1373,7 +1680,7 @@ function EditMemberModal({ db, me, member, onClose, actions }) {
             setErr("There must be at least one owner.");
             return;
         }
-        actions.updateMember(member.id, { name, position, access, jobRoles, rate: parseFloat(rate) || 0, method });
+        actions.updateMember(member.id, { name, position, access, jobRoles, rate: parseFloat(rate) || 0 });
         onClose();
     }
     function remove() {
