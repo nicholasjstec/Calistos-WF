@@ -194,6 +194,7 @@ function makeActions(meId) {
         // store location + time clock
         setStoreLocation: (lat, lng, radius, address) => supabase.from("settings").update({ store_lat: lat, store_lng: lng, radius_miles: radius, store_address: address || null, updated_by: meId, updated_at: new Date().toISOString() }).eq("id", 1),
         clockIn: (lat, lng) => supabase.from("time_entries").insert({ user_id: meId, in_lat: lat, in_lng: lng }),
+        updateTimeEntry: (id, inISO, outISO) => supabase.from("time_entries").update({ clock_in: inISO, clock_out: outISO }).eq("id", id),
         clockOut: (entryId, lat, lng) => supabase.from("time_entries").update({ clock_out: new Date().toISOString(), out_lat: lat, out_lng: lng }).eq("id", entryId),
         // time off
         requestTimeOff: ({ start, end, reason }) => supabase.from("time_off").insert({ user_id: meId, start_date: start, end_date: end, reason }),
@@ -975,7 +976,7 @@ function MyTrades({ db, incoming, outgoing, actions }) {
 }
 function ShiftModal({ db, shift, onClose, actions }) {
     const isNew = !shift.id;
-    const staff = db.users.filter((u) => u.position !== "owner");
+    const staff = db.users;
     const [userId, setUserId] = useState(shift.userId || (staff[0] && staff[0].id) || db.users[0]?.id);
     const [date, setDate] = useState(shift.date || todayKey());
     const [start, setStart] = useState(shift.start || "09:00");
@@ -1060,8 +1061,10 @@ function ShiftModal({ db, shift, onClose, actions }) {
 function AvailabilityView({ db, me, isEmployer, actions }) {
     if (isEmployer)
         return (React.createElement("div", null,
+            React.createElement(AvailabilityEditor, { db: db, me: me, actions: actions }),
             React.createElement(AvailabilityGrid, { db: db }),
-            React.createElement(TimeOffManager, { db: db, actions: actions })));
+            React.createElement(TimeOffManager, { db: db, actions: actions }),
+            React.createElement(MyTimeOff, { db: db, me: me, actions: actions })));
     return (React.createElement("div", null,
         React.createElement(AvailabilityEditor, { db: db, me: me, actions: actions }),
         React.createElement(MyTimeOff, { db: db, me: me, actions: actions })));
@@ -1085,7 +1088,7 @@ function AvailabilityEditor({ db, me, actions }) {
         }))));
 }
 function AvailabilityGrid({ db }) {
-    const staff = db.users.filter((u) => u.position !== "owner");
+    const staff = db.users;
     return (React.createElement("div", null,
         React.createElement(SectionTitle, { title: "Team availability", sub: "Weekly pattern submitted by each person." }),
         React.createElement("div", { style: { overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 12, background: C.card } },
@@ -1297,8 +1300,11 @@ function PayrollView({ db, actions }) {
                 " This week"),
             React.createElement("button", { className: "cw-chip", onClick: () => setSub("records"), style: { background: sub === "records" ? C.maroon : C.card, color: sub === "records" ? C.boneSoft : C.ink, borderColor: sub === "records" ? C.maroon : C.line } },
                 React.createElement(CircleDollarSign, { size: 13 }),
-                " Records")),
-        sub === "records" ? React.createElement(RecordsView, { db: db }) : React.createElement(React.Fragment, null,
+                " Records"),
+            React.createElement("button", { className: "cw-chip", onClick: () => setSub("sheets"), style: { background: sub === "sheets" ? C.maroon : C.card, color: sub === "sheets" ? C.boneSoft : C.ink, borderColor: sub === "sheets" ? C.maroon : C.line } },
+                React.createElement(Timer, { size: 13 }),
+                " Timesheets")),
+        sub === "sheets" ? React.createElement(TimesheetView, { db: db, actions: actions }) : sub === "records" ? React.createElement(RecordsView, { db: db }) : React.createElement(React.Fragment, null,
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
                 React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o - 1) },
                     React.createElement(ChevronLeft, { size: 18 })),
@@ -1453,6 +1459,70 @@ function MyPayView({ db, me, actions }) {
                 React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: iAffirmed ? C.green : C.ink } }, iAffirmed ? "You confirmed you got paid" : "Confirm you got paid"),
                 React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, "Lets management know the money landed.")))));
 }
+function TimesheetView({ db, actions }) {
+    const [date, setDate] = useState(todayKey());
+    const [editing, setEditing] = useState(null);
+    const d0 = new Date(date + "T00:00").getTime(), d1 = d0 + 86400000;
+    const entries = (db.timeEntries || []).filter((t) => t.in < d1 && (t.out || Date.now()) > d0).sort((a, b) => a.in - b.in);
+    const userById = (id) => db.users.find((u) => u.id === id);
+    const fmtT = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    return (React.createElement("div", null,
+        React.createElement("div", { style: { fontSize: 12.5, color: C.muted, marginBottom: 12 } }, "Clock-in records. Tap one to fix the times \u2014 e.g. when someone forgot to clock out."),
+        React.createElement(Field, { label: "Day" },
+            React.createElement("input", { type: "date", style: inputStyle, value: date, onChange: (e) => setDate(e.target.value) })),
+        entries.length === 0 ? React.createElement(Empty, { icon: React.createElement(Timer, { size: 28 }), text: "No clocked time on this day." }) : entries.map((t) => {
+            const u = userById(t.userId);
+            return React.createElement("button", { key: t.id, className: "cw-card", onClick: () => setEditing(t), style: { width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, marginBottom: 9 } },
+                React.createElement(Avatar, { user: u, size: 32 }),
+                React.createElement("div", { style: { flex: 1 } },
+                    React.createElement("div", { style: { fontWeight: 700, fontSize: 13.5, color: C.ink } }, u?.name || "?"),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted } },
+                        fmtT(t.in),
+                        " \u2192 ",
+                        t.out ? fmtT(t.out) : "still clocked in",
+                        " \u00B7 ",
+                        fmtDur((t.out || Date.now()) - t.in))),
+                !t.out && React.createElement("span", { className: "cw-pill", style: { background: C.amberSoft, color: C.amber } }, "Open"),
+                React.createElement(Pencil, { size: 14, color: C.muted }));
+        }),
+        editing && React.createElement(EditEntryModal, { entry: editing, user: userById(editing.userId), onClose: () => setEditing(null), actions: actions })));
+}
+function EditEntryModal({ entry, user, onClose, actions }) {
+    const toLocal = (ms) => { const d = new Date(ms); return `${toKey(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+    const [inV, setInV] = useState(toLocal(entry.in));
+    const [outV, setOutV] = useState(entry.out ? toLocal(entry.out) : "");
+    const [err, setErr] = useState("");
+    const [busy, setBusy] = useState(false);
+    async function save() {
+        const inMs = new Date(inV).getTime();
+        const outMs = outV ? new Date(outV).getTime() : null;
+        if (!inMs) {
+            setErr("Clock-in time is required.");
+            return;
+        }
+        if (outMs && outMs <= inMs) {
+            setErr("Clock-out must be after clock-in.");
+            return;
+        }
+        setBusy(true);
+        const { error } = await actions.updateTimeEntry(entry.id, new Date(inMs).toISOString(), outMs ? new Date(outMs).toISOString() : null);
+        setBusy(false);
+        if (error) {
+            setErr(error.message);
+            return;
+        }
+        onClose();
+    }
+    return (React.createElement(Modal, { title: `${user?.name || "Entry"} — fix times`, onClose: onClose },
+        React.createElement(Field, { label: "Clock in" },
+            React.createElement("input", { type: "datetime-local", style: inputStyle, value: inV, onChange: (e) => { setInV(e.target.value); setErr(""); } })),
+        React.createElement(Field, { label: "Clock out (leave empty if still working)" },
+            React.createElement("input", { type: "datetime-local", style: inputStyle, value: outV, onChange: (e) => { setOutV(e.target.value); setErr(""); } })),
+        err && React.createElement("div", { style: { color: C.danger, fontSize: 12.5, marginBottom: 10 } }, err),
+        React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "flex-end" } },
+            React.createElement(Btn, { variant: "ghost", onClick: onClose }, "Cancel"),
+            React.createElement(Btn, { onClick: save, disabled: busy }, busy ? "Saving…" : "Save times"))));
+}
 function RecordsView({ db }) {
     const N = 8;
     const [detail, setDetail] = useState(null); // {userId, weekIdx}
@@ -1534,25 +1604,70 @@ function AffirmCluster({ shifts, db }) {
             React.createElement(Avatar, { user: p, size: 20 })))));
 }
 function TipsModal({ db, weekKeys, onClose, actions }) {
-    const shifts = db.shifts.filter((s) => weekKeys.includes(s.date));
+    const [date, setDate] = useState(todayKey());
     const [pool, setPool] = useState("");
-    function distribute() { const amt = parseFloat(pool) || 0; if (!amt || shifts.length === 0)
-        return; const totalHours = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0); shifts.forEach((s) => { const share = totalHours ? (hoursBetween(s.start, s.end) / totalHours) * amt : 0; actions.setTip(s.id, Math.round(share * 100) / 100); }); onClose(); }
-    return (React.createElement(Modal, { title: "Tips for the week", onClose: onClose },
-        React.createElement("div", { style: { background: C.boneSoft, border: `1px solid ${C.line}`, borderRadius: 9, padding: "11px 13px", marginBottom: 16, fontSize: 12.5, color: C.muted, display: "flex", gap: 8 } },
+    const dayShifts = db.shifts.filter((s) => s.date === date);
+    const d0 = new Date(date + "T00:00").getTime(), d1 = d0 + 86400000;
+    const clockedMs = {};
+    (db.timeEntries || []).forEach((t) => {
+        const out = t.out || Date.now();
+        const ms = Math.max(0, Math.min(out, d1) - Math.max(t.in, d0));
+        if (ms > 0)
+            clockedMs[t.userId] = (clockedMs[t.userId] || 0) + ms;
+    });
+    const usingClock = Object.keys(clockedMs).length > 0;
+    const basis = {};
+    if (usingClock)
+        Object.keys(clockedMs).forEach((u) => { basis[u] = clockedMs[u] / 3600000; });
+    else
+        dayShifts.forEach((s) => { basis[s.userId] = (basis[s.userId] || 0) + hoursBetween(s.start, s.end); });
+    const totalH = Object.values(basis).reduce((a, b) => a + b, 0);
+    const amt = parseFloat(pool) || 0;
+    const userById = (id) => db.users.find((u) => u.id === id);
+    const rows = Object.keys(basis).map((uid) => ({ uid, h: basis[uid], share: totalH ? (basis[uid] / totalH) * amt : 0, shifts: dayShifts.filter((s) => s.userId === uid) }));
+    const unassignable = rows.filter((r) => r.shifts.length === 0);
+    function distribute() {
+        if (!amt || !totalH)
+            return;
+        rows.forEach((r) => {
+            if (!r.shifts.length)
+                return;
+            const sh = r.shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0);
+            r.shifts.forEach((s) => {
+                const part = sh ? (hoursBetween(s.start, s.end) / sh) * r.share : r.share / r.shifts.length;
+                actions.setTip(s.id, Math.round(part * 100) / 100);
+            });
+        });
+        onClose();
+    }
+    return (React.createElement(Modal, { title: "Day's tips", onClose: onClose },
+        React.createElement("div", { style: { background: C.boneSoft, border: `1px solid ${C.line}`, borderRadius: 9, padding: "11px 13px", marginBottom: 14, fontSize: 12.5, color: C.muted, display: "flex", gap: 8 } },
             React.createElement(Coffee, { size: 16, style: { flexShrink: 0, color: C.maroon } }),
-            React.createElement("span", null, "Enter tips per shift on the payroll list, or pool the week's tips here and split them by hours worked.")),
-        React.createElement(Field, { label: "Pooled tips this week ($)" },
+            React.createElement("span", null,
+                "Enter the whole day's tips. Each cut = (their ",
+                usingClock ? "clocked" : "scheduled",
+                " hours \u00F7 the team's ",
+                usingClock ? "clocked" : "scheduled",
+                " hours that day) \u00D7 the pool.")),
+        React.createElement(Field, { label: "Day" },
+            React.createElement("input", { type: "date", style: inputStyle, value: date, onChange: (e) => setDate(e.target.value) })),
+        React.createElement(Field, { label: "Total tips that day ($)" },
             React.createElement("input", { type: "number", min: "0", style: inputStyle, value: pool, onChange: (e) => setPool(e.target.value), placeholder: "e.g. 480" })),
-        React.createElement("p", { style: { fontSize: 12, color: C.muted, marginTop: -4 } },
-            "Splits across ",
-            shifts.length,
-            " shift",
-            shifts.length === 1 ? "" : "s",
-            " proportionally to hours."),
+        rows.length === 0 && React.createElement("p", { style: { fontSize: 12.5, color: C.danger } }, "No clocked time and no shifts on this day yet."),
+        rows.length > 0 && amt > 0 && (React.createElement("div", { className: "cw-card", style: { marginBottom: 12 } }, rows.map((r) => React.createElement("div", { key: r.uid, style: { display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 0", color: C.ink } },
+            React.createElement("span", null,
+                userById(r.uid)?.name || "?",
+                " \u00B7 ",
+                r.h.toFixed(2),
+                "h"),
+            React.createElement("b", null, money(r.share)))))),
+        unassignable.length > 0 && React.createElement("p", { style: { fontSize: 12, color: C.danger } },
+            "No shift this day for: ",
+            unassignable.map((r) => userById(r.uid)?.name).join(", "),
+            " \u2014 give them a shift on this date first so their share has somewhere to live."),
         React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "flex-end", marginTop: 8 } },
             React.createElement(Btn, { variant: "ghost", onClick: onClose }, "Cancel"),
-            React.createElement(Btn, { onClick: distribute, disabled: !pool }, "Split by hours"))));
+            React.createElement(Btn, { onClick: distribute, disabled: !amt || !totalH || rows.every((r) => !r.shifts.length) }, "Split tips"))));
 }
 /* ---------------- NEWS ---------------- */
 function NewsView({ db, me, isEmployer, actions }) {
@@ -1695,13 +1810,8 @@ function EditMemberModal({ db, me, member, onClose, actions }) {
     return (React.createElement(Modal, { title: `Edit ${member.name}`, onClose: onClose, wide: true },
         React.createElement(Field, { label: "Name" },
             React.createElement("input", { style: inputStyle, value: name, onChange: (e) => setName(e.target.value) })),
-        React.createElement("div", { style: { display: "flex", gap: 10 } },
-            React.createElement("div", { style: { flex: 1 } },
-                React.createElement(Field, { label: "Rate $/hr" },
-                    React.createElement("input", { type: "number", style: inputStyle, value: rate, onChange: (e) => setRate(e.target.value) }))),
-            React.createElement("div", { style: { flex: 1.4 } },
-                React.createElement(Field, { label: "Pays via" },
-                    React.createElement("select", { style: inputStyle, value: method, onChange: (e) => setMethod(e.target.value) }, PAYMENT_METHODS.map((m) => React.createElement("option", { key: m }, m)))))),
+        React.createElement(Field, { label: "Rate $/hr" },
+            React.createElement("input", { type: "number", style: inputStyle, value: rate, onChange: (e) => setRate(e.target.value) })),
         React.createElement(Field, { label: "Position" },
             React.createElement("div", { className: "cw-seg" }, POSITIONS.map((p) => React.createElement("button", { key: p, className: "cw-segbtn", style: segStyle(position === p), onClick: () => pickPosition(p) }, cap(p))))),
         React.createElement(Field, { label: "Access level" },
