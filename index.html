@@ -4,6 +4,11 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>CALISTO'S — Staff</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#591C29" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="CALISTO'S" />
 <style>*{margin:0;box-sizing:border-box}html,body,#root{min-height:100%}
 #boot{font-family:system-ui;color:#8A8174;text-align:center;padding:80px 20px}</style>
 </head>
@@ -50,6 +55,8 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // The app's own address — used so email links always come back here
 const APP_URL = window.location.origin + window.location.pathname;
+const VAPID_PUBLIC = "BBrXMWobEulKEQCI8MdXQ-WXmlringr1xNoTP_3CPeXW8aGzKeEytAb-f0BllHdE_v2B2tEPofheZa0-ed_mErA";
+function urlB64ToU8(s) { const pad = "=".repeat((4 - (s.length % 4)) % 4); const b = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/")); return Uint8Array.from(b, (c) => c.charCodeAt(0)); }
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 /* ---------------- AUTH ---------------- */
 const auth = {
@@ -194,6 +201,7 @@ function makeActions(meId) {
         // store location + time clock
         setStoreLocation: (lat, lng, radius, address) => supabase.from("settings").update({ store_lat: lat, store_lng: lng, radius_miles: radius, store_address: address || null, updated_by: meId, updated_at: new Date().toISOString() }).eq("id", 1),
         clockIn: (lat, lng) => supabase.from("time_entries").insert({ user_id: meId, in_lat: lat, in_lng: lng }),
+        savePushSubscription: (endpoint, p256dh, auth) => supabase.from("push_subscriptions").upsert({ endpoint, user_id: meId, p256dh, auth }, { onConflict: "endpoint" }),
         updateTimeEntry: (id, inISO, outISO) => supabase.from("time_entries").update({ clock_in: inISO, clock_out: outISO }).eq("id", id),
         clockOut: (entryId, lat, lng) => supabase.from("time_entries").update({ clock_out: new Date().toISOString(), out_lat: lat, out_lng: lng }).eq("id", entryId),
         // time off
@@ -687,7 +695,7 @@ function Header({ me, db, actions, onSignOut }) {
                             React.createElement("span", { style: { color: C.ink, fontSize: 13.5 } }, "Sign out"))))))));
 }
 function NotifIcon({ type }) {
-    const map = { schedule: { i: CalendarDays, c: C.maroon }, pay: { i: Wallet, c: C.green }, trade: { i: ArrowLeftRight, c: C.amber }, timeoff: { i: CalendarOff, c: C.steel } };
+    const map = { schedule: { i: CalendarDays, c: C.maroon }, pay: { i: Wallet, c: C.green }, trade: { i: ArrowLeftRight, c: C.amber }, timeoff: { i: CalendarOff, c: C.steel }, chat: { i: MessageSquare, c: C.maroon } };
     const { i: I, c } = map[type] || { i: Bell, c: C.steel };
     return React.createElement("div", { style: { width: 28, height: 28, borderRadius: 8, background: C.boneSoft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
         React.createElement(I, { size: 15, color: c }));
@@ -755,14 +763,14 @@ function ScheduleView({ db, me, isEmployer, actions }) {
                 React.createElement(BadgeCheck, { size: 18, color: published ? C.green : C.muted }),
                 React.createElement("div", { style: { flex: 1 } },
                     React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: C.ink } },
-                        published ? "Released" : "Draft",
+                        published ? "Published" : "Draft",
                         " \u00B7 ",
                         weekLabel(week)),
-                    React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, published ? `Notified ${new Date(published).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : "Staff aren't notified until you release.")),
-                React.createElement(Btn, { small: true, variant: published ? "ghost" : "primary", disabled: !weekHasShifts, onClick: () => actions.releaseWeek(weekKey) }, published ? "Notify again" : "Release"))) : React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginBottom: 12, fontSize: 12, color: published ? C.green : C.muted } },
+                    React.createElement("div", { style: { fontSize: 11.5, color: C.muted } }, published ? `Notified ${new Date(published).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : "Staff aren't notified until you publish.")),
+                React.createElement(Btn, { small: true, variant: published ? "ghost" : "primary", disabled: !weekHasShifts, onClick: () => actions.releaseWeek(weekKey) }, published ? "Notify again" : "Publish"))) : React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginBottom: 12, fontSize: 12, color: published ? C.green : C.muted } },
                 React.createElement(BadgeCheck, { size: 14 }),
                 " ",
-                published ? `Schedule released for ${weekLabel(week)}` : `Schedule for ${weekLabel(week)} isn't final yet`),
+                published ? `Schedule published for ${weekLabel(week)}` : `Schedule for ${weekLabel(week)} isn't final yet`),
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
                 React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o - 1) },
                     React.createElement(ChevronLeft, { size: 18 })),
@@ -1710,8 +1718,75 @@ function NewsView({ db, me, isEmployer, actions }) {
 /* ---------------- TEAM ---------------- */
 function TeamView({ db, me, isEmployer, actions }) {
     if (!isEmployer)
-        return React.createElement(MyProfile, { db: db, me: me, actions: actions });
-    return React.createElement(OwnerTeam, { db: db, me: me, actions: actions });
+        return (React.createElement("div", null,
+            React.createElement(PushCard, { actions: actions }),
+            React.createElement(MyProfile, { db: db, me: me, actions: actions })));
+    return (React.createElement("div", null,
+        React.createElement(PushCard, { actions: actions }),
+        React.createElement(OwnerTeam, { db: db, me: me, actions: actions })));
+}
+function PushCard({ actions }) {
+    const [state, setState] = useState("checking");
+    useEffect(() => {
+        const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        if (isIOS && !standalone) {
+            setState("install");
+            return;
+        }
+        if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+            setState("unsupported");
+            return;
+        }
+        if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+            setState("denied");
+            return;
+        }
+        navigator.serviceWorker.register("sw.js").then(async (reg) => {
+            const sub = await reg.pushManager.getSubscription();
+            setState(sub ? "enabled" : "ready");
+        }).catch(() => setState("error"));
+    }, []);
+    async function enable() {
+        try {
+            const perm = await Notification.requestPermission();
+            if (perm !== "granted") {
+                setState("denied");
+                return;
+            }
+            const reg = await navigator.serviceWorker.ready;
+            const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToU8(VAPID_PUBLIC) });
+            const j = sub.toJSON();
+            const { error } = await actions.savePushSubscription(j.endpoint, j.keys.p256dh, j.keys.auth);
+            if (error) {
+                setState("error");
+                return;
+            }
+            setState("enabled");
+        }
+        catch (e) {
+            setState("error");
+        }
+    }
+    if (state === "checking" || state === "unsupported")
+        return null;
+    return (React.createElement("div", { className: "cw-card", style: { marginBottom: 16, display: "flex", alignItems: "center", gap: 12 } },
+        React.createElement("div", { style: { width: 34, height: 34, borderRadius: 9, background: C.boneSoft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
+            React.createElement(Bell, { size: 17, color: C.maroon })),
+        React.createElement("div", { style: { flex: 1 } },
+            React.createElement("div", { style: { fontWeight: 700, fontSize: 13.5, color: C.ink } }, "Phone notifications"),
+            state === "install" && React.createElement("div", { style: { fontSize: 12, color: C.muted } },
+                "Add this app to your Home Screen first: tap Safari's ",
+                React.createElement("b", null, "Share"),
+                " button, then ",
+                React.createElement("b", null, "Add to Home Screen"),
+                ", and open it from the new icon."),
+            state === "ready" && React.createElement("div", { style: { fontSize: 12, color: C.muted } }, "Get banners for schedules, chats, news, and time off \u2014 even when the app is closed."),
+            state === "enabled" && React.createElement("div", { style: { fontSize: 12, color: C.green } }, "On \u2014 this phone gets banners for schedules, chats, news, and time off."),
+            state === "denied" && React.createElement("div", { style: { fontSize: 12, color: C.muted } }, "Notifications are blocked. Enable them in Settings \u2192 Notifications \u2192 CALISTO'S."),
+            state === "error" && React.createElement("div", { style: { fontSize: 12, color: C.danger } }, "Couldn't turn notifications on. Reload and try again.")),
+        state === "ready" && React.createElement(Btn, { small: true, onClick: enable }, "Turn on"),
+        state === "enabled" && React.createElement(CircleCheck, { size: 19, color: C.green })));
 }
 function MyProfile({ db, me, actions }) {
     const [method, setMethod] = useState(PAYMENT_METHODS.includes(me.method) ? me.method : "Venmo");
