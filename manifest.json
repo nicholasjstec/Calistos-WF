@@ -1,0 +1,10 @@
+{
+  "name": "CALISTO'S",
+  "short_name": "CALISTO'S",
+  "start_url": "/Calistos-WF/",
+  "scope": "/Calistos-WF/",
+  "display": "standalone",
+  "background_color": "#E9E2D3",
+  "theme_color": "#591C29",
+  "icons": []
+}
