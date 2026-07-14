@@ -204,6 +204,8 @@ function makeActions(meId) {
         savePushSubscription: (endpoint, p256dh, auth) => supabase.from("push_subscriptions").upsert({ endpoint, user_id: meId, p256dh, auth }, { onConflict: "endpoint" }),
         updateTimeEntry: (id, inISO, outISO) => supabase.from("time_entries").update({ clock_in: inISO, clock_out: outISO }).eq("id", id),
         clockOut: (entryId, lat, lng) => supabase.from("time_entries").update({ clock_out: new Date().toISOString(), out_lat: lat, out_lng: lng }).eq("id", entryId),
+        addTimeEntry: ({ userId, inISO, outISO }) => supabase.from("time_entries").insert({ user_id: userId, clock_in: inISO, clock_out: outISO }),
+        deleteTimeEntry: (id) => supabase.from("time_entries").delete().eq("id", id),
         // time off
         requestTimeOff: ({ start, end, reason }) => supabase.from("time_off").insert({ user_id: meId, start_date: start, end_date: end, reason }),
         decideTimeOff: (id, approve) => supabase.from("time_off").update({ status: approve ? "approved" : "denied" }).eq("id", id),
@@ -1470,14 +1472,20 @@ function MyPayView({ db, me, actions }) {
 function TimesheetView({ db, actions }) {
     const [date, setDate] = useState(todayKey());
     const [editing, setEditing] = useState(null);
+    const [adding, setAdding] = useState(false);
     const d0 = new Date(date + "T00:00").getTime(), d1 = d0 + 86400000;
     const entries = (db.timeEntries || []).filter((t) => t.in < d1 && (t.out || Date.now()) > d0).sort((a, b) => a.in - b.in);
     const userById = (id) => db.users.find((u) => u.id === id);
     const fmtT = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     return (React.createElement("div", null,
-        React.createElement("div", { style: { fontSize: 12.5, color: C.muted, marginBottom: 12 } }, "Clock-in records. Tap one to fix the times \u2014 e.g. when someone forgot to clock out."),
-        React.createElement(Field, { label: "Day" },
-            React.createElement("input", { type: "date", style: inputStyle, value: date, onChange: (e) => setDate(e.target.value) })),
+        React.createElement("div", { style: { fontSize: 12.5, color: C.muted, marginBottom: 12 } }, "Clock-in records. Tap one to fix the times or remove it \u2014 or add someone who forgot to clock in/out, so that day pays out correctly."),
+        React.createElement("div", { style: { display: "flex", alignItems: "flex-end", gap: 9, marginBottom: 12 } },
+            React.createElement("div", { style: { flex: 1 } },
+                React.createElement(Field, { label: "Day" },
+                    React.createElement("input", { type: "date", style: inputStyle, value: date, onChange: (e) => setDate(e.target.value) }))),
+            React.createElement(Btn, { small: true, onClick: () => setAdding(true), style: { marginBottom: 13 } },
+                React.createElement(UserPlus, { size: 14 }),
+                " Add person")),
         entries.length === 0 ? React.createElement(Empty, { icon: React.createElement(Timer, { size: 28 }), text: "No clocked time on this day." }) : entries.map((t) => {
             const u = userById(t.userId);
             return React.createElement("button", { key: t.id, className: "cw-card", onClick: () => setEditing(t), style: { width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, marginBottom: 9 } },
@@ -1493,7 +1501,51 @@ function TimesheetView({ db, actions }) {
                 !t.out && React.createElement("span", { className: "cw-pill", style: { background: C.amberSoft, color: C.amber } }, "Open"),
                 React.createElement(Pencil, { size: 14, color: C.muted }));
         }),
-        editing && React.createElement(EditEntryModal, { entry: editing, user: userById(editing.userId), onClose: () => setEditing(null), actions: actions })));
+        editing && React.createElement(EditEntryModal, { entry: editing, user: userById(editing.userId), onClose: () => setEditing(null), actions: actions }),
+        adding && React.createElement(AddEntryModal, { db: db, date: date, onClose: () => setAdding(false), actions: actions })));
+}
+function AddEntryModal({ db, date, onClose, actions }) {
+    const people = db.users.slice().sort((a, b) => a.name.localeCompare(b.name));
+    const [userId, setUserId] = useState(people[0]?.id || "");
+    const [inV, setInV] = useState(`${date}T09:00`);
+    const [outV, setOutV] = useState(`${date}T17:00`);
+    const [err, setErr] = useState("");
+    const [busy, setBusy] = useState(false);
+    async function save() {
+        if (!userId) {
+            setErr("Choose who this entry is for.");
+            return;
+        }
+        const inMs = new Date(inV).getTime();
+        const outMs = outV ? new Date(outV).getTime() : null;
+        if (!inMs) {
+            setErr("Clock-in time is required.");
+            return;
+        }
+        if (outMs && outMs <= inMs) {
+            setErr("Clock-out must be after clock-in.");
+            return;
+        }
+        setBusy(true);
+        const { error } = await actions.addTimeEntry({ userId, inISO: new Date(inMs).toISOString(), outISO: outMs ? new Date(outMs).toISOString() : null });
+        setBusy(false);
+        if (error) {
+            setErr(error.message);
+            return;
+        }
+        onClose();
+    }
+    return (React.createElement(Modal, { title: "Add a clock-in", onClose: onClose },
+        React.createElement(Field, { label: "Team member" },
+            React.createElement("select", { style: inputStyle, value: userId, onChange: (e) => setUserId(e.target.value) }, people.map((u) => React.createElement("option", { key: u.id, value: u.id }, u.name)))),
+        React.createElement(Field, { label: "Clock in" },
+            React.createElement("input", { type: "datetime-local", style: inputStyle, value: inV, onChange: (e) => { setInV(e.target.value); setErr(""); } })),
+        React.createElement(Field, { label: "Clock out (leave empty if still working)" },
+            React.createElement("input", { type: "datetime-local", style: inputStyle, value: outV, onChange: (e) => { setOutV(e.target.value); setErr(""); } })),
+        err && React.createElement("div", { style: { color: C.danger, fontSize: 12.5, marginBottom: 10 } }, err),
+        React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "flex-end" } },
+            React.createElement(Btn, { variant: "ghost", onClick: onClose }, "Cancel"),
+            React.createElement(Btn, { onClick: save, disabled: busy }, busy ? "Adding…" : "Add entry"))));
 }
 function EditEntryModal({ entry, user, onClose, actions }) {
     const toLocal = (ms) => { const d = new Date(ms); return `${toKey(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
@@ -1521,15 +1573,31 @@ function EditEntryModal({ entry, user, onClose, actions }) {
         }
         onClose();
     }
+    async function remove() {
+        if (!window.confirm(`Remove ${user?.name || "this person"}'s clock-in for this day?`))
+            return;
+        setBusy(true);
+        const { error } = await actions.deleteTimeEntry(entry.id);
+        setBusy(false);
+        if (error) {
+            setErr(error.message);
+            return;
+        }
+        onClose();
+    }
     return (React.createElement(Modal, { title: `${user?.name || "Entry"} — fix times`, onClose: onClose },
         React.createElement(Field, { label: "Clock in" },
             React.createElement("input", { type: "datetime-local", style: inputStyle, value: inV, onChange: (e) => { setInV(e.target.value); setErr(""); } })),
         React.createElement(Field, { label: "Clock out (leave empty if still working)" },
             React.createElement("input", { type: "datetime-local", style: inputStyle, value: outV, onChange: (e) => { setOutV(e.target.value); setErr(""); } })),
         err && React.createElement("div", { style: { color: C.danger, fontSize: 12.5, marginBottom: 10 } }, err),
-        React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "flex-end" } },
-            React.createElement(Btn, { variant: "ghost", onClick: onClose }, "Cancel"),
-            React.createElement(Btn, { onClick: save, disabled: busy }, busy ? "Saving…" : "Save times"))));
+        React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "space-between" } },
+            React.createElement(Btn, { variant: "danger", onClick: remove, disabled: busy },
+                React.createElement(Trash2, { size: 14 }),
+                " Remove"),
+            React.createElement("div", { style: { display: "flex", gap: 9 } },
+                React.createElement(Btn, { variant: "ghost", onClick: onClose }, "Cancel"),
+                React.createElement(Btn, { onClick: save, disabled: busy }, busy ? "Saving…" : "Save times")))));
 }
 function RecordsView({ db }) {
     const N = 8;
