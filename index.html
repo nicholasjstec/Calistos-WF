@@ -1322,7 +1322,7 @@ function PayrollView({ db, actions }) {
             React.createElement("button", { className: "cw-chip", onClick: () => setSub("sheets"), style: { background: sub === "sheets" ? C.maroon : C.card, color: sub === "sheets" ? C.boneSoft : C.ink, borderColor: sub === "sheets" ? C.maroon : C.line } },
                 React.createElement(Timer, { size: 13 }),
                 " Timesheets")),
-        sub === "sheets" ? React.createElement(TimesheetView, { db: db, actions: actions }) : sub === "records" ? React.createElement(RecordsView, { db: db }) : React.createElement(React.Fragment, null,
+        sub === "sheets" ? React.createElement(TimesheetView, { db: db, actions: actions }) : sub === "records" ? React.createElement(RecordsView, { db: db, actions: actions }) : React.createElement(React.Fragment, null,
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
                 React.createElement("button", { className: "cw-nav", onClick: () => setOffset((o) => o - 1) },
                     React.createElement(ChevronLeft, { size: 18 })),
@@ -1411,7 +1411,10 @@ function PayrollView({ db, actions }) {
                                         money(sBase(s)),
                                         p.tips ? ` + ${money(p.tips)} tips` : "")),
                                 React.createElement("input", { type: "number", min: "0", step: "1", defaultValue: p.tips || "", placeholder: "tips", onBlur: (e) => actions.setTip(s.id, parseFloat(e.target.value) || 0), style: { ...inputStyle, width: 64, padding: "5px 7px", fontSize: 12.5 } }),
-                                React.createElement("div", { style: { width: 64, textAlign: "right", fontWeight: 700, fontSize: 13, color: C.ink } }, money(sTotal(s))));
+                                React.createElement("div", { style: { width: 64, textAlign: "right", fontWeight: 700, fontSize: 13, color: C.ink } }, money(sTotal(s))),
+                                React.createElement("button", { className: "cw-iconbtn", title: "Remove this shift from pay", onClick: () => { if (window.confirm(`Remove ${dlabel(s.date)} · ${s.role} from ${u?.name || "this person"}'s pay? This deletes the shift.`))
+                                        actions.deleteShift(s.id); } },
+                                    React.createElement(Trash2, { size: 14 })));
                         }),
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, paddingTop: 12 } },
                             React.createElement(Toggle, { on: userPaid, color: C.green, onClick: () => actions.setWeekPaid(shifts.map((s) => s.id), !userPaid) }),
@@ -1616,7 +1619,7 @@ function EditEntryModal({ entry, user, onClose, actions }) {
                 React.createElement(Btn, { variant: "ghost", onClick: onClose }, "Cancel"),
                 React.createElement(Btn, { onClick: save, disabled: busy }, busy ? "Saving…" : "Save times")))));
 }
-function RecordsView({ db }) {
+function RecordsView({ db, actions }) {
     const N = 8;
     const [detail, setDetail] = useState(null); // {userId, weekIdx}
     const weeks = Array.from({ length: N }, (_, i) => weekDates(-i));
@@ -1675,7 +1678,12 @@ function RecordsView({ db }) {
                             p.tips ? ` + ${money(p.tips)} tips` : "")),
                     React.createElement("div", { style: { textAlign: "right" } },
                         React.createElement("div", { style: { fontWeight: 700, fontSize: 13, color: C.ink } }, money(amt)),
-                        React.createElement("span", { className: "cw-pill", style: { background: p.paid ? C.greenSoft : "#F3DDDB", color: p.paid ? C.green : C.danger } }, p.paid ? "Paid" : "Owed")));
+                        React.createElement("span", { className: "cw-pill", style: { background: p.paid ? C.greenSoft : "#F3DDDB", color: p.paid ? C.green : C.danger } }, p.paid ? "Paid" : "Owed")),
+                    React.createElement("button", { className: "cw-iconbtn", title: "Remove this shift from pay", onClick: () => { if (window.confirm(`Remove ${dlabel(s.date)} · ${s.role} from ${detail.u.name}'s pay? This deletes the shift.`)) {
+                                actions.deleteShift(s.id);
+                                setDetail(null);
+                            } } },
+                        React.createElement(Trash2, { size: 14 })));
             }),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "12px 0 2px", fontWeight: 700, color: C.ink } },
                 React.createElement("span", null, "Week total"),
