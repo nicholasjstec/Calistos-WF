@@ -1481,12 +1481,15 @@ function TimesheetView({ db, actions }) {
     const [date, setDate] = useState(todayKey());
     const [editing, setEditing] = useState(null);
     const [adding, setAdding] = useState(false);
+    const [shiftFor, setShiftFor] = useState(null);
     const d0 = new Date(date + "T00:00").getTime(), d1 = d0 + 86400000;
     const entries = (db.timeEntries || []).filter((t) => t.in < d1 && (t.out || Date.now()) > d0).sort((a, b) => a.in - b.in);
     const userById = (id) => db.users.find((u) => u.id === id);
     const fmtT = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    const toHM = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+    const hasShift = (t) => db.shifts.some((s) => s.userId === t.userId && s.date === date);
     return (React.createElement("div", null,
-        React.createElement("div", { style: { fontSize: 12.5, color: C.muted, marginBottom: 12 } }, "Clock-in records. Tap one to fix the times or remove it \u2014 or add someone who forgot to clock in/out, so that day pays out correctly."),
+        React.createElement("div", { style: { fontSize: 12.5, color: C.muted, marginBottom: 12 } }, "Clock-in records. Tap one to fix the times or remove it \u2014 or add someone who forgot to clock in/out. An entry with no matching shift won't count toward pay until you add it to the schedule."),
         React.createElement("div", { style: { display: "flex", alignItems: "flex-end", gap: 9, marginBottom: 12 } },
             React.createElement("div", { style: { flex: 1 } },
                 React.createElement(Field, { label: "Day" },
@@ -1496,20 +1499,26 @@ function TimesheetView({ db, actions }) {
                 " Add person")),
         entries.length === 0 ? React.createElement(Empty, { icon: React.createElement(Timer, { size: 28 }), text: "No clocked time on this day." }) : entries.map((t) => {
             const u = userById(t.userId);
-            return React.createElement("button", { key: t.id, className: "cw-card", onClick: () => setEditing(t), style: { width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, marginBottom: 9 } },
-                React.createElement(Avatar, { user: u, size: 32 }),
-                React.createElement("div", { style: { flex: 1 } },
-                    React.createElement("div", { style: { fontWeight: 700, fontSize: 13.5, color: C.ink } }, u?.name || "?"),
-                    React.createElement("div", { style: { fontSize: 12, color: C.muted } },
-                        fmtT(t.in),
-                        " \u2192 ",
-                        t.out ? fmtT(t.out) : "still clocked in",
-                        " \u00B7 ",
-                        fmtDur((t.out || Date.now()) - t.in))),
-                !t.out && React.createElement("span", { className: "cw-pill", style: { background: C.amberSoft, color: C.amber } }, "Open"),
-                React.createElement(Pencil, { size: 14, color: C.muted }));
+            const scheduled = hasShift(t);
+            return React.createElement("div", { key: t.id, className: "cw-card", style: { display: "flex", alignItems: "center", gap: 11, marginBottom: 9 } },
+                React.createElement("button", { onClick: () => setEditing(t), style: { flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 11, textAlign: "left", background: "none", border: "none", padding: 0, font: "inherit", color: "inherit", cursor: "pointer" } },
+                    React.createElement(Avatar, { user: u, size: 32 }),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 13.5, color: C.ink } }, u?.name || "?"),
+                        React.createElement("div", { style: { fontSize: 12, color: C.muted } },
+                            fmtT(t.in),
+                            " \u2192 ",
+                            t.out ? fmtT(t.out) : "still clocked in",
+                            " \u00B7 ",
+                            fmtDur((t.out || Date.now()) - t.in))),
+                    !t.out && React.createElement("span", { className: "cw-pill", style: { background: C.amberSoft, color: C.amber } }, "Open"),
+                    React.createElement(Pencil, { size: 14, color: C.muted })),
+                !scheduled && React.createElement(Btn, { small: true, variant: "steel", onClick: () => setShiftFor({ date, userId: t.userId, start: toHM(t.in), end: t.out ? toHM(t.out) : undefined }) },
+                    React.createElement(CalendarDays, { size: 13 }),
+                    " Add to schedule"));
         }),
         editing && React.createElement(EditEntryModal, { entry: editing, user: userById(editing.userId), onClose: () => setEditing(null), actions: actions }),
+        shiftFor && React.createElement(ShiftModal, { db: db, shift: shiftFor, onClose: () => setShiftFor(null), actions: actions }),
         adding && React.createElement(AddEntryModal, { db: db, date: date, onClose: () => setAdding(false), actions: actions })));
 }
 function AddEntryModal({ db, date, onClose, actions }) {
