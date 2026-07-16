@@ -236,6 +236,14 @@ const weekLabel = (w) => `${fmtDay(w[0])}–${fmtDay(w[6])}`;
 function toMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
 function hoursBetween(s, e) { let d = (toMin(e) - toMin(s)) / 60; if (d < 0)
     d += 24; return Math.round(d * 100) / 100; }
+function hoursWorked(db, s) {
+    const d0 = new Date(s.date + "T00:00").getTime(), d1 = d0 + 86400000;
+    const entries = (db.timeEntries || []).filter((t) => t.userId === s.userId && t.in < d1 && (t.out || Date.now()) > d0);
+    if (!entries.length)
+        return hoursBetween(s.start, s.end);
+    const ms = entries.reduce((a, t) => a + Math.max(0, Math.min(t.out || Date.now(), d1) - Math.max(t.in, d0)), 0);
+    return Math.round((ms / 3600000) * 100) / 100;
+}
 function fmtTime(t) { const [h, m] = t.split(":").map(Number); const ap = h >= 12 ? "PM" : "AM"; const hh = h % 12 || 12; return `${hh}:${pad(m)} ${ap}`; }
 const money = (n) => `$${(n || 0).toFixed(2)}`;
 const todayKey = () => toKey(new Date());
@@ -1293,7 +1301,7 @@ function PayrollView({ db, actions }) {
     const byUser = {};
     weekShifts.forEach((s) => { (byUser[s.userId] = byUser[s.userId] || []).push(s); });
     const userById = (id) => db.users.find((u) => u.id === id);
-    const sBase = (s) => hoursBetween(s.start, s.end) * rateOf(db, s.userId);
+    const sBase = (s) => hoursWorked(db, s) * rateOf(db, s.userId);
     const sTotal = (s) => sBase(s) + (payFor(db, s.id).tips || 0);
     const allPaid = weekShifts.length > 0 && weekShifts.every((s) => payFor(db, s.id).paid);
     const somePaid = weekShifts.some((s) => payFor(db, s.id).paid);
@@ -1348,7 +1356,7 @@ function PayrollView({ db, actions }) {
                                         React.createElement(Avatar, { user: u, size: 22 }),
                                         React.createElement("span", { style: { fontWeight: 600, fontSize: 12.5 } }, u?.name))),
                                 week.map((d, i) => { const dk = toKey(d); const ds = shifts.filter((s) => s.date === dk); if (ds.length === 0)
-                                    return React.createElement("td", { key: i }); const hrs = ds.reduce((a, s) => a + hoursBetween(s.start, s.end), 0); const paid = ds.every((s) => payFor(db, s.id).paid); return React.createElement("td", { key: i, style: { textAlign: "center", padding: 4 } },
+                                    return React.createElement("td", { key: i }); const hrs = ds.reduce((a, s) => a + hoursWorked(db, s), 0); const paid = ds.every((s) => payFor(db, s.id).paid); return React.createElement("td", { key: i, style: { textAlign: "center", padding: 4 } },
                                     React.createElement("div", { style: { background: paid ? C.greenSoft : C.amberSoft, color: paid ? C.green : C.amber, borderRadius: 7, padding: "5px 2px", fontSize: 11, fontWeight: 700 } },
                                         hrs,
                                         "h",
@@ -1366,7 +1374,7 @@ function PayrollView({ db, actions }) {
                 const base = shifts.reduce((a, s) => a + sBase(s), 0);
                 const tips = shifts.reduce((a, s) => a + (payFor(db, s.id).tips || 0), 0);
                 const total = base + tips;
-                const hrs = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0);
+                const hrs = shifts.reduce((a, s) => a + hoursWorked(db, s), 0);
                 const userPaid = shifts.every((s) => payFor(db, s.id).paid);
                 return React.createElement("div", { key: userId, className: "cw-card", style: { padding: 0, overflow: "hidden" } },
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, padding: "13px 15px", background: userPaid ? C.greenSoft : C.boneSoft, borderBottom: `1px solid ${C.line}` } },
@@ -1396,7 +1404,7 @@ function PayrollView({ db, actions }) {
                                         " \u00B7 ",
                                         s.role),
                                     React.createElement("div", { style: { fontSize: 11.5, color: C.muted } },
-                                        hoursBetween(s.start, s.end),
+                                        hoursWorked(db, s),
                                         "h \u00D7 ",
                                         money(rateOf(db, s.userId)),
                                         " = ",
@@ -1419,11 +1427,11 @@ function MyPayView({ db, me, actions }) {
     const week = weekDates(offset);
     const weekKeys = week.map(toKey);
     const shifts = db.shifts.filter((s) => weekKeys.includes(s.date) && s.userId === me.id).sort((a, b) => a.date.localeCompare(b.date));
-    const sBase = (s) => hoursBetween(s.start, s.end) * me.rate;
+    const sBase = (s) => hoursWorked(db, s) * me.rate;
     const base = shifts.reduce((a, s) => a + sBase(s), 0);
     const tips = shifts.reduce((a, s) => a + (payFor(db, s.id).tips || 0), 0);
     const total = base + tips;
-    const hrs = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end), 0);
+    const hrs = shifts.reduce((a, s) => a + hoursWorked(db, s), 0);
     const paid = shifts.length > 0 && shifts.every((s) => payFor(db, s.id).paid);
     const iAffirmed = shifts.length > 0 && shifts.every((s) => payFor(db, s.id).affirmed.includes(me.id));
     return (React.createElement("div", null,
@@ -1457,7 +1465,7 @@ function MyPayView({ db, me, actions }) {
                         " \u00B7 ",
                         s.role),
                     React.createElement("div", { style: { fontSize: 11.5, color: C.muted } },
-                        hoursBetween(s.start, s.end),
+                        hoursWorked(db, s),
                         "h \u00D7 ",
                         money(me.rate),
                         p.tips ? ` + ${money(p.tips)} tips` : "")),
@@ -1609,7 +1617,7 @@ function RecordsView({ db }) {
         const shifts = db.shifts.filter((s) => s.userId === u.id && keys.includes(s.date));
         if (!shifts.length)
             return { state: "none", total: 0, shifts };
-        const total = shifts.reduce((a, s) => a + hoursBetween(s.start, s.end) * u.rate + (payFor(db, s.id).tips || 0), 0);
+        const total = shifts.reduce((a, s) => a + hoursWorked(db, s) * u.rate + (payFor(db, s.id).tips || 0), 0);
         const allPaid = shifts.every((s) => payFor(db, s.id).paid);
         return { state: allPaid ? "paid" : "due", total, shifts };
     };
@@ -1644,7 +1652,7 @@ function RecordsView({ db }) {
         detail && (React.createElement(Modal, { title: `${detail.u.name} · ${weekLabel(detail.wk)}`, onClose: () => setDetail(null) },
             detail.c.shifts.sort((a, b) => a.date.localeCompare(b.date)).map((s, i) => {
                 const p = payFor(db, s.id);
-                const amt = hoursBetween(s.start, s.end) * detail.u.rate + (p.tips || 0);
+                const amt = hoursWorked(db, s) * detail.u.rate + (p.tips || 0);
                 return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.boneSoft}` } },
                     React.createElement("div", { style: { flex: 1 } },
                         React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: C.ink } },
@@ -1652,7 +1660,7 @@ function RecordsView({ db }) {
                             " \u00B7 ",
                             s.role),
                         React.createElement("div", { style: { fontSize: 11.5, color: C.muted } },
-                            hoursBetween(s.start, s.end),
+                            hoursWorked(db, s),
                             "h \u00D7 ",
                             money(detail.u.rate),
                             p.tips ? ` + ${money(p.tips)} tips` : "")),
