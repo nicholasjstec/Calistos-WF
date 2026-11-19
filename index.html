@@ -211,7 +211,7 @@ function makeActions(meId) {
         renameFolder: (id, name) => supabase.from("document_folders").update({ name }).eq("id", id),
         setFolderVisibility: (id, visibility) => supabase.from("document_folders").update({ visibility }).eq("id", id),
         deleteFolder: (id) => supabase.from("document_folders").delete().eq("id", id),
-        getDocumentUrl: (path) => supabase.storage.from("documents").createSignedUrl(path, 60),
+        getDocumentUrl: (path, downloadName) => supabase.storage.from("documents").createSignedUrl(path, 60, downloadName ? { download: downloadName } : undefined),
         // trades
         offerTrade: ({ shiftId, toUser }) => supabase.from("trades").insert({ shift_id: shiftId, from_user: meId, to_user: toUser, status: "pending" }),
         respondTrade: (id, accept) => supabase.from("trades").update({ status: accept ? "accepted" : "declined" }).eq("id", id),
@@ -1894,6 +1894,15 @@ function DocumentsView({ db, me, isEmployer, actions }) {
         else
             window.location.href = r.data.signedUrl;
     }
+    async function downloadDoc(d) {
+        setErr("");
+        const r = await actions.getDocumentUrl(d.path, d.name);
+        if (r.error || !r.data) {
+            setErr(`Couldn't download ${d.name}: ${r.error ? r.error.message : "no link returned"}`);
+            return;
+        }
+        window.location.href = r.data.signedUrl;
+    }
     async function remove(d) {
         if (!window.confirm(`Delete "${d.name}" for everyone? This can't be undone.`))
             return;
@@ -1961,6 +1970,8 @@ function DocumentsView({ db, me, isEmployer, actions }) {
                             " · ",
                             new Date(d.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
                             u ? ` · ${u.name}` : ""))),
+                React.createElement("button", { className: "cw-iconbtn", title: "Download", onClick: () => downloadDoc(d) },
+                    React.createElement(Download, { size: 14 })),
                 isEmployer && allFolders.length > 0 && React.createElement("button", { className: "cw-iconbtn", title: "Move to folder", onClick: () => setMoving(d) },
                     React.createElement(FolderInput, { size: 14 })),
                 isEmployer && React.createElement("button", { className: "cw-iconbtn", title: "Rename", onClick: () => { setRenaming({ kind: "doc", id: d.id }); setNewName(d.name); } },
