@@ -49,7 +49,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "https://esm.sh/react@18.3.1";
 import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { ArrowLeftRight, BadgeCheck, Banknote, Bell, CalendarDays, CalendarOff, Check, ChevronLeft, ChevronRight, CircleCheck, CircleDollarSign, Clock, Coffee, CreditCard, Download, FileText, Hash, Info, Lock, LogOut, MailCheck, MapPin, Megaphone, MessageSquare, Pencil, Plus, Send, ShieldCheck, Timer, Trash2, UserPlus, Users, Wallet, X } from "https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1";
+import { ArrowLeftRight, BadgeCheck, Banknote, Bell, CalendarDays, CalendarOff, Check, ChevronLeft, ChevronRight, CircleCheck, CircleDollarSign, Clock, Coffee, CreditCard, Download, FileText, Folder, FolderInput, FolderPlus, Hash, Info, Lock, LogOut, MailCheck, MapPin, Megaphone, MessageSquare, Pencil, Plus, Send, ShieldCheck, Timer, Trash2, UserPlus, Users, Wallet, X } from "https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1";
 const SUPABASE_URL = "https://sruklonvqydtgstbofms.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNydWtsb252cXlkdGdzdGJvZm1zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyODE3NjAsImV4cCI6MjA5ODg1Nzc2MH0.352OIf2sOHqE-A5Aq3YKzEcU4DxU0p11VKGxoNFidWk";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -87,7 +87,7 @@ async function loadAll() {
             b = b.order(order.col, { ascending: order.asc !== false });
         return b;
     };
-    const [profiles, pp, roles, shifts, availability, trades, pay, affs, notifs, anns, channels, cmembers, messages, published, settings, timeEntries, timeOff, documents,] = await Promise.all([
+    const [profiles, pp, roles, shifts, availability, trades, pay, affs, notifs, anns, channels, cmembers, messages, published, settings, timeEntries, timeOff, documents, docFolders,] = await Promise.all([
         q("profiles"), q("private_pay"), q("roles"), q("shifts"),
         q("availability"), q("trades"), q("pay"), q("pay_affirmations"),
         q("notifications", "*", { col: "created_at", asc: false }),
@@ -95,6 +95,7 @@ async function loadAll() {
         q("messages", "*", { col: "created_at" }), q("published"),
         q("settings"), q("time_entries", "*", { col: "clock_in", asc: false }), q("time_off", "*", { col: "created_at", asc: false }),
         q("documents", "*", { col: "created_at", asc: false }),
+        q("document_folders", "*", { col: "created_at" }),
     ]);
     const err = [profiles, pp, roles, shifts, availability, trades, pay, affs, notifs, anns, channels, cmembers, messages, published].find((r) => r.error);
     if (err)
@@ -139,7 +140,8 @@ async function loadAll() {
             ? { visible: true, lat: settings.data[0].store_lat, lng: settings.data[0].store_lng, radius: Number(settings.data[0].radius_miles) || 1, address: settings.data[0].store_address || "" }
             : { visible: false, lat: null, lng: null, radius: 1, address: "" },
         timeEntries: (timeEntries.data || []).map((t) => ({ id: t.id, userId: t.user_id, in: new Date(t.clock_in).getTime(), out: t.clock_out ? new Date(t.clock_out).getTime() : null })),
-        documents: (documents.data || []).map((d) => ({ id: d.id, name: d.name, path: d.path, mime: d.mime || "", size: Number(d.size) || 0, visibility: d.visibility, uploadedBy: d.uploaded_by, ts: new Date(d.created_at).getTime() })),
+        documents: (documents.data || []).map((d) => ({ id: d.id, name: d.name, path: d.path, mime: d.mime || "", size: Number(d.size) || 0, visibility: d.visibility, uploadedBy: d.uploaded_by, folderId: d.folder_id || null, ts: new Date(d.created_at).getTime() })),
+        documentFolders: (docFolders.data || []).map((f) => ({ id: f.id, name: f.name, visibility: f.visibility, ts: new Date(f.created_at).getTime() })),
         timeOff: (timeOff.data || []).map((t) => ({ id: t.id, userId: t.user_id, start: t.start_date, end: t.end_date, reason: t.reason || "", status: t.status, ts: new Date(t.created_at).getTime() })),
     };
 }
@@ -185,13 +187,13 @@ function makeActions(meId) {
         postAnnouncement: ({ title, body }) => supabase.from("announcements").insert({ author_id: meId, title, body }),
         deleteAnnouncement: (id) => supabase.from("announcements").delete().eq("id", id),
         // documents (managers only; RLS enforces it)
-        addDocument: async (file, visibility) => {
+        addDocument: async (file, visibility, folderId) => {
             const ext = (file.name.match(/\.[A-Za-z0-9]{1,8}$/) || [""])[0].toLowerCase();
             const path = `${crypto.randomUUID()}${ext}`;
             const up = await supabase.storage.from("documents").upload(path, file, { contentType: file.type || "application/octet-stream" });
             if (up.error)
                 return up;
-            const ins = await supabase.from("documents").insert({ name: file.name, path, mime: file.type || null, size: file.size, visibility, uploaded_by: meId });
+            const ins = await supabase.from("documents").insert({ name: file.name, path, mime: file.type || null, size: file.size, visibility, folder_id: folderId || null, uploaded_by: meId });
             if (ins.error)
                 await supabase.storage.from("documents").remove([path]);
             return ins;
@@ -204,6 +206,11 @@ function makeActions(meId) {
                 await supabase.storage.from("documents").remove([doc.path]);
             return del;
         },
+        moveDocument: (id, folderId) => supabase.from("documents").update({ folder_id: folderId || null }).eq("id", id),
+        createFolder: (name, visibility) => supabase.from("document_folders").insert({ name, visibility, created_by: meId }),
+        renameFolder: (id, name) => supabase.from("document_folders").update({ name }).eq("id", id),
+        setFolderVisibility: (id, visibility) => supabase.from("document_folders").update({ visibility }).eq("id", id),
+        deleteFolder: (id) => supabase.from("document_folders").delete().eq("id", id),
         getDocumentUrl: (path) => supabase.storage.from("documents").createSignedUrl(path, 60),
         // trades
         offerTrade: ({ shiftId, toUser }) => supabase.from("trades").insert({ shift_id: shiftId, from_user: meId, to_user: toUser, status: "pending" }),
@@ -1840,11 +1847,20 @@ function DocumentsView({ db, me, isEmployer, actions }) {
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState("");
     const [newVis, setNewVis] = useState("managers");
+    const [openId, setOpenId] = useState(null);
     const [renaming, setRenaming] = useState(null);
     const [newName, setNewName] = useState("");
+    const [creating, setCreating] = useState(false);
+    const [folderName, setFolderName] = useState("");
+    const [moving, setMoving] = useState(null);
     const fileRef = useRef(null);
-    const list = [...db.documents].sort((a, b) => b.ts - a.ts);
+    const allFolders = [...db.documentFolders].sort((a, b) => a.name.localeCompare(b.name));
+    const folder = openId ? allFolders.find((f) => f.id === openId) || null : null;
+    const countIn = (id) => db.documents.filter((d) => d.folderId === id).length;
+    const folders = isEmployer ? allFolders : allFolders.filter((f) => countIn(f.id) > 0);
+    const list = db.documents.filter((d) => (d.folderId || null) === (folder ? folder.id : null)).sort((a, b) => b.ts - a.ts);
     const userById = (id) => db.users.find((u) => u.id === id);
+    const fail = (what, r) => { if (r && r.error) { setErr(`Couldn't ${what}: ${r.error.message}`); return true; } return false; };
     async function onPick(e) {
         const files = Array.from(e.target.files || []);
         e.target.value = "";
@@ -1857,11 +1873,9 @@ function DocumentsView({ db, me, isEmployer, actions }) {
                 setErr(`${f.name} is over 25 MB and was skipped.`);
                 continue;
             }
-            const r = await actions.addDocument(f, newVis);
-            if (r && r.error) {
-                setErr(`Couldn't upload ${f.name}: ${r.error.message}`);
+            const r = await actions.addDocument(f, newVis, folder ? folder.id : null);
+            if (fail(`upload ${f.name}`, r))
                 break;
-            }
         }
         setBusy(false);
     }
@@ -1883,56 +1897,116 @@ function DocumentsView({ db, me, isEmployer, actions }) {
     async function remove(d) {
         if (!window.confirm(`Delete "${d.name}" for everyone? This can't be undone.`))
             return;
-        const r = await actions.deleteDocument(d);
-        if (r.error)
-            setErr(`Couldn't delete: ${r.error.message}`);
+        fail("delete", await actions.deleteDocument(d));
+    }
+    async function removeFolder(f) {
+        const n = countIn(f.id);
+        if (!window.confirm(`Delete the folder "${f.name}"? ${n ? `Its ${n} file${n === 1 ? "" : "s"} will move back to the main list.` : "It is empty."}`))
+            return;
+        if (!fail("delete the folder", await actions.deleteFolder(f.id)) && openId === f.id)
+            setOpenId(null);
     }
     async function saveRename() {
         const name = newName.trim();
         if (!name)
             return;
-        const r = await actions.renameDocument(renaming.id, name);
-        if (r.error)
-            setErr(`Couldn't rename: ${r.error.message}`);
+        fail("rename", renaming.kind === "folder" ? await actions.renameFolder(renaming.id, name) : await actions.renameDocument(renaming.id, name));
         setRenaming(null);
     }
-    async function setVis(d, vis) {
-        const r = await actions.setDocumentVisibility(d.id, vis);
-        if (r.error)
-            setErr(`Couldn't change who can see it: ${r.error.message}`);
+    async function saveFolder() {
+        const name = folderName.trim();
+        if (!name)
+            return;
+        if (!fail("create the folder", await actions.createFolder(name, newVis))) {
+            setCreating(false);
+            setFolderName("");
+        }
     }
+    async function moveTo(folderId) {
+        const d = moving;
+        setMoving(null);
+        fail("move the file", await actions.moveDocument(d.id, folderId));
+    }
+    const visRow = (shared, onToggle, sharedText, privateText) => React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 11, paddingTop: 10, borderTop: `1px solid ${C.line}` } },
+        React.createElement(Toggle, { on: shared, onClick: onToggle }),
+        React.createElement("div", { style: { fontSize: 12.5, color: shared ? C.green : C.steel, fontWeight: 600 } }, shared ? sharedText : privateText));
+    const folderCard = (f) => {
+        const shared = f.visibility === "everyone";
+        const n = countIn(f.id);
+        return React.createElement("div", { key: f.id, className: "cw-card" },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11 } },
+                React.createElement("button", { onClick: () => setOpenId(f.id), style: { flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontFamily: "inherit" } },
+                    React.createElement(Folder, { size: 22, color: C.maroon, style: { flexShrink: 0 } }),
+                    React.createElement("div", { style: { minWidth: 0 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14, color: C.ink, wordBreak: "break-word" } }, f.name),
+                        React.createElement("div", { style: { fontSize: 11.5, color: C.muted, marginTop: 2 } }, `${n} file${n === 1 ? "" : "s"}`))),
+                isEmployer && React.createElement("button", { className: "cw-iconbtn", title: "Rename folder", onClick: () => { setRenaming({ kind: "folder", id: f.id }); setNewName(f.name); } },
+                    React.createElement(Pencil, { size: 14 })),
+                isEmployer && React.createElement("button", { className: "cw-iconbtn", title: "Delete folder", onClick: () => removeFolder(f) },
+                    React.createElement(Trash2, { size: 14 })),
+                !isEmployer && React.createElement(ChevronRight, { size: 18, color: C.muted })),
+            isEmployer && visRow(shared, async () => fail("change who can see the folder", await actions.setFolderVisibility(f.id, shared ? "managers" : "everyone")), "Managers and employees can see this folder", "Managers only"));
+    };
+    const docCard = (d) => {
+        const u = userById(d.uploadedBy);
+        const shared = d.visibility === "everyone";
+        return React.createElement("div", { key: d.id, className: "cw-card" },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11 } },
+                React.createElement("button", { onClick: () => openDoc(d), style: { flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontFamily: "inherit" } },
+                    React.createElement(FileText, { size: 22, color: C.maroon, style: { flexShrink: 0 } }),
+                    React.createElement("div", { style: { minWidth: 0 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14, color: C.ink, wordBreak: "break-word" } }, d.name),
+                        React.createElement("div", { style: { fontSize: 11.5, color: C.muted, marginTop: 2 } },
+                            fmtSize(d.size),
+                            " · ",
+                            new Date(d.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+                            u ? ` · ${u.name}` : ""))),
+                isEmployer && allFolders.length > 0 && React.createElement("button", { className: "cw-iconbtn", title: "Move to folder", onClick: () => setMoving(d) },
+                    React.createElement(FolderInput, { size: 14 })),
+                isEmployer && React.createElement("button", { className: "cw-iconbtn", title: "Rename", onClick: () => { setRenaming({ kind: "doc", id: d.id }); setNewName(d.name); } },
+                    React.createElement(Pencil, { size: 14 })),
+                isEmployer && React.createElement("button", { className: "cw-iconbtn", title: "Delete", onClick: () => remove(d) },
+                    React.createElement(Trash2, { size: 14 }))),
+            isEmployer && visRow(shared, async () => fail("change who can see it", await actions.setDocumentVisibility(d.id, shared ? "managers" : "everyone")), "Managers and employees can see this", "Managers only"));
+    };
+    const empty = list.length === 0 && (folder || folders.length === 0);
+    const folderShared = folder && folder.visibility === "everyone";
     return (React.createElement("div", null,
-        React.createElement(SectionTitle, { title: "Documents", sub: isEmployer ? "Upload files and choose who can see each one." : "Files shared with the team.", action: isEmployer && React.createElement(Btn, { small: true, disabled: busy, onClick: () => fileRef.current && fileRef.current.click() },
-                React.createElement(Plus, { size: 15 }),
-                busy ? " Uploading\u2026" : " Add") }),
+        folder && React.createElement("div", { style: { marginBottom: 8 } },
+            React.createElement(Btn, { small: true, variant: "ghost", onClick: () => setOpenId(null) },
+                React.createElement(ChevronLeft, { size: 15 }),
+                " All documents")),
+        React.createElement(SectionTitle, { title: folder ? folder.name : "Documents", sub: isEmployer ? (folder ? "Files in this folder." : "Upload files, organize them in folders, and choose who can see each one.") : (folder ? "Files in this folder." : "Files shared with the team."), action: isEmployer && React.createElement("div", { style: { display: "flex", gap: 8 } },
+                !folder && React.createElement(Btn, { small: true, variant: "ghost", onClick: () => { setFolderName(""); setCreating(true); } },
+                    React.createElement(FolderPlus, { size: 15 }),
+                    " Folder"),
+                React.createElement(Btn, { small: true, disabled: busy, onClick: () => fileRef.current && fileRef.current.click() },
+                    React.createElement(Plus, { size: 15 }),
+                    busy ? " Uploading…" : " Add")) }),
         isEmployer && React.createElement("input", { ref: fileRef, type: "file", multiple: true, onChange: onPick, style: { display: "none" } }),
         isEmployer && React.createElement("div", { className: "cw-card", style: { marginBottom: 14, display: "flex", alignItems: "center", gap: 10 } },
             React.createElement(Toggle, { on: newVis === "everyone", onClick: () => setNewVis(newVis === "everyone" ? "managers" : "everyone") }),
-            React.createElement("div", { style: { fontSize: 12.5, color: C.muted } }, newVis === "everyone" ? "New uploads: managers and employees can see them." : "New uploads: managers only.")),
+            React.createElement("div", { style: { fontSize: 12.5, color: C.muted } }, newVis === "everyone" ? "New uploads and folders: managers and employees can see them." : "New uploads and folders: managers only.")),
+        isEmployer && folder && !folderShared && React.createElement("div", { style: { background: C.boneSoft, color: C.steel, borderRadius: 9, padding: "9px 12px", fontSize: 12.5, marginBottom: 12 } }, "This folder is managers only, so employees can't see anything in it. Turn on sharing for the folder from the All documents page."),
         err && React.createElement("div", { style: { background: "#F6DEDC", color: C.danger, borderRadius: 9, padding: "9px 12px", fontSize: 13, marginBottom: 12 } }, err),
-        list.length === 0 ? React.createElement(Empty, { icon: React.createElement(FileText, { size: 30 }), text: isEmployer ? "No documents yet. Tap Add to upload one." : "No documents have been shared yet." }) : (React.createElement("div", { style: { display: "grid", gap: 10 } }, list.map((d) => {
-            const u = userById(d.uploadedBy);
-            const shared = d.visibility === "everyone";
-            return React.createElement("div", { key: d.id, className: "cw-card" },
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11 } },
-                    React.createElement("button", { onClick: () => openDoc(d), style: { flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontFamily: "inherit" } },
-                        React.createElement(FileText, { size: 22, color: C.maroon, style: { flexShrink: 0 } }),
-                        React.createElement("div", { style: { minWidth: 0 } },
-                            React.createElement("div", { style: { fontWeight: 700, fontSize: 14, color: C.ink, wordBreak: "break-word" } }, d.name),
-                            React.createElement("div", { style: { fontSize: 11.5, color: C.muted, marginTop: 2 } },
-                                fmtSize(d.size),
-                                " \u00B7 ",
-                                new Date(d.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-                                u ? ` \u00B7 ${u.name}` : ""))),
-                    isEmployer && React.createElement("button", { className: "cw-iconbtn", title: "Rename", onClick: () => { setRenaming(d); setNewName(d.name); } },
-                        React.createElement(Pencil, { size: 14 })),
-                    isEmployer && React.createElement("button", { className: "cw-iconbtn", title: "Delete", onClick: () => remove(d) },
-                        React.createElement(Trash2, { size: 14 }))),
-                isEmployer ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 11, paddingTop: 10, borderTop: `1px solid ${C.line}` } },
-                    React.createElement(Toggle, { on: shared, onClick: () => setVis(d, shared ? "managers" : "everyone") }),
-                    React.createElement("div", { style: { fontSize: 12.5, color: shared ? C.green : C.steel, fontWeight: 600 } }, shared ? "Managers and employees can see this" : "Managers only")) : null);
-        }))),
-        renaming && React.createElement(Modal, { title: "Rename document", onClose: () => setRenaming(null) },
+        empty ? React.createElement(Empty, { icon: React.createElement(FileText, { size: 30 }), text: folder ? (isEmployer ? "This folder is empty. Tap Add to upload a file here." : "This folder is empty.") : (isEmployer ? "No documents yet. Tap Add to upload one." : "No documents have been shared yet.") }) : (React.createElement("div", { style: { display: "grid", gap: 10 } },
+            !folder && folders.map(folderCard),
+            list.map(docCard))),
+        creating && React.createElement(Modal, { title: "New folder", onClose: () => setCreating(false) },
+            React.createElement(Field, { label: "Folder name" },
+                React.createElement("input", { style: inputStyle, value: folderName, autoFocus: true, onChange: (e) => setFolderName(e.target.value), onKeyDown: (e) => e.key === "Enter" && saveFolder() })),
+            React.createElement("div", { style: { fontSize: 12.5, color: C.muted, marginBottom: 13 } }, newVis === "everyone" ? "Managers and employees will see this folder." : "Managers only. You can share it later."),
+            React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "flex-end" } },
+                React.createElement(Btn, { variant: "ghost", onClick: () => setCreating(false) }, "Cancel"),
+                React.createElement(Btn, { onClick: saveFolder }, "Create"))),
+        moving && React.createElement(Modal, { title: `Move "${moving.name}"`, onClose: () => setMoving(null) },
+            React.createElement("div", { style: { display: "grid", gap: 8 } },
+                moving.folderId && React.createElement(Btn, { variant: "ghost", onClick: () => moveTo(null) }, "Main list (no folder)"),
+                allFolders.filter((f) => f.id !== moving.folderId).map((f) => React.createElement(Btn, { key: f.id, variant: "ghost", onClick: () => moveTo(f.id) },
+                    React.createElement(Folder, { size: 15 }),
+                    " ",
+                    f.name)))),
+        renaming && React.createElement(Modal, { title: renaming.kind === "folder" ? "Rename folder" : "Rename document", onClose: () => setRenaming(null) },
             React.createElement(Field, { label: "Name" },
                 React.createElement("input", { style: inputStyle, value: newName, autoFocus: true, onChange: (e) => setNewName(e.target.value), onKeyDown: (e) => e.key === "Enter" && saveRename() })),
             React.createElement("div", { style: { display: "flex", gap: 9, justifyContent: "flex-end" } },
